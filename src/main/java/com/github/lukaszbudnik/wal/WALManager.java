@@ -4,21 +4,28 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * High-level manager for Write Ahead Log operations. Provides convenience methods and manages
  * sequence number generation. All methods are thread-safe.
  */
 public class WALManager implements AutoCloseable {
+  private static final Logger logger = LoggerFactory.getLogger(WALManager.class);
 
   private final WriteAheadLog wal;
 
   public WALManager(WriteAheadLog wal) {
     this.wal = wal;
+    logger.info(
+        "WALManager created with provided WAL implementation: {}", wal.getClass().getSimpleName());
   }
 
   public WALManager(Path walDirectory) throws WALException {
+    logger.info("Creating WALManager with FileBasedWAL in directory: {}", walDirectory);
     this.wal = new FileBasedWAL(walDirectory);
+    logger.debug("WALManager created successfully");
   }
 
   /**
@@ -114,7 +121,9 @@ public class WALManager implements AutoCloseable {
 
   @Override
   public void close() throws Exception {
+    logger.info("Closing WALManager");
     sync();
     wal.close();
+    logger.info("WALManager closed successfully");
   }
 }

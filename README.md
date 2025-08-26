@@ -18,7 +18,7 @@ database systems.
 - **Log truncation** for space management
 - **Generic record types** - users can define custom record types
 - **Persistent sequence numbers** - always incrementing even after restart
-- **Clean encapsulation** - WAL manages all sequence numbers and timestamps automatically
+- **Professional logging** with SLF4J for production-ready operation
 
 ## Architecture
 
@@ -250,6 +250,16 @@ The WAL uses a binary file format with CRC32 checksums:
 - **CRC32 checksums** ensure data integrity and detect corruption
 - **Automatic file rotation** when files exceed the configured size limit
 - **Sequential access pattern** optimized for write performance
+
+## Logging
+
+Pintor uses SLF4J for logging.
+
+### Log Levels
+- **INFO**: WAL lifecycle events (initialization, file rotation, close)
+- **DEBUG**: Detailed operation information (file operations, range building)
+- **WARN**: Non-fatal issues (corrupted entries, file access problems)
+- **ERROR**: Fatal errors that prevent WAL operation
 
 ## Configuration
 
