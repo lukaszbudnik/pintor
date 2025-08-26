@@ -57,11 +57,10 @@ public class FileBasedWAL implements WriteAheadLog {
   }
 
   private void initialize() throws IOException, WALException {
-    // Load the persistent sequence number
-    loadSequenceNumber();
-    
     // Open sequence file for reuse (create if doesn't exist)
     sequenceFileRAF = new RandomAccessFile(sequenceFile.toFile(), "rw");
+
+    loadSequenceNumber();
 
     // Discover existing WAL files
     try (DirectoryStream<Path> stream =
@@ -79,11 +78,10 @@ public class FileBasedWAL implements WriteAheadLog {
   }
 
   private void loadSequenceNumber() throws IOException {
-    if (Files.exists(sequenceFile)) {
-      try (DataInputStream dis = new DataInputStream(Files.newInputStream(sequenceFile))) {
-        currentSequenceNumber = dis.readLong();
-      }
-    } else {
+    sequenceFileRAF.seek(0);
+    try {
+      currentSequenceNumber = sequenceFileRAF.readLong();
+    } catch (IOException e) {
       currentSequenceNumber = -1;
     }
   }
@@ -164,16 +162,6 @@ public class FileBasedWAL implements WriteAheadLog {
   // Internal method for appending a single entry (used by createAndAppend)
   private void appendInternal(WALEntry entry) throws WALException {
     try {
-      // Ensure sequence number is always incrementing
-      long nextSeq = currentSequenceNumber + 1;
-      if (entry.getSequenceNumber() != nextSeq) {
-        throw new WALException(
-            "Invalid sequence number. Expected: "
-                + nextSeq
-                + ", got: "
-                + entry.getSequenceNumber());
-      }
-
       writeEntry(entry);
       currentSequenceNumber = entry.getSequenceNumber();
 
@@ -196,19 +184,6 @@ public class FileBasedWAL implements WriteAheadLog {
   // Internal method for appending multiple entries (used by createAndAppendBatch)
   private void appendBatchInternal(List<WALEntry> entries) throws WALException {
     try {
-      // Validate sequence numbers
-      long expectedSeq = currentSequenceNumber + 1;
-      for (WALEntry entry : entries) {
-        if (entry.getSequenceNumber() != expectedSeq) {
-          throw new WALException(
-              "Invalid sequence number in batch. Expected: "
-                  + expectedSeq
-                  + ", got: "
-                  + entry.getSequenceNumber());
-        }
-        expectedSeq++;
-      }
-
       for (WALEntry entry : entries) {
         writeEntry(entry);
         currentSequenceNumber = entry.getSequenceNumber();
