@@ -1,11 +1,10 @@
 package com.github.lukaszbudnik.wal;
 
-import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.ByteBuffer;
 import java.time.Instant;
-
-import static org.junit.jupiter.api.Assertions.*;
+import org.junit.jupiter.api.Test;
 
 class WALEntryTest {
     
