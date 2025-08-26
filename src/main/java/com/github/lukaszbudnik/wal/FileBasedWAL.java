@@ -8,6 +8,8 @@ import java.util.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * File-based implementation of Write Ahead Log.
@@ -20,6 +22,7 @@ import java.util.zip.CRC32;
  * sequence number that always increments (even after restart)
  */
 public class FileBasedWAL implements WriteAheadLog {
+  private static final Logger logger = LoggerFactory.getLogger(FileBasedWAL.class);
 
   private static final String WAL_FILE_PREFIX = "wal-";
   private static final String WAL_FILE_SUFFIX = ".log";
@@ -50,10 +53,22 @@ public class FileBasedWAL implements WriteAheadLog {
     this.maxFileSize = maxFileSize;
     this.syncOnWrite = syncOnWrite;
 
+    logger.info(
+        "Initializing FileBasedWAL: directory={}, maxFileSize={} bytes, syncOnWrite={}",
+        walDirectory,
+        maxFileSize,
+        syncOnWrite);
+
     try {
       Files.createDirectories(walDirectory);
       initialize();
+      logger.info(
+          "FileBasedWAL initialized successfully: currentSequence={}, currentFileIndex={}, files={}",
+          currentSequenceNumber,
+          currentFileIndex,
+          walFiles.size());
     } catch (IOException e) {
+      logger.error("Failed to initialize WAL in directory {}: {}", walDirectory, e.getMessage(), e);
       throw new WALException("Failed to initialize WAL", e);
     }
   }
@@ -158,11 +173,8 @@ public class FileBasedWAL implements WriteAheadLog {
 
       } catch (Exception e) {
         // If we can't read the file, skip it but log the issue
-        System.err.println(
-            "Warning: Could not read sequence range from file "
-                + currentFileIndex
-                + ": "
-                + e.getMessage());
+        logger.warn(
+            "Could not read sequence range from file {}: {}", currentFileIndex, e.getMessage(), e);
       }
     }
   }
@@ -324,11 +336,18 @@ public class FileBasedWAL implements WriteAheadLog {
   }
 
   private void rotateFile() throws IOException {
+    logger.info("Rotating WAL file from index {} to {}", currentFileIndex, currentFileIndex + 1);
+
     // Update sequence range for the file we're rotating away from
     updateSequenceRangeForCurrentFile();
 
     currentFileIndex++;
     openCurrentFile();
+
+    logger.debug(
+        "File rotation completed: new file index={}, total files={}",
+        currentFileIndex,
+        walFiles.size());
   }
 
   /**
@@ -346,8 +365,7 @@ public class FileBasedWAL implements WriteAheadLog {
         }
       } catch (WALException e) {
         // Log warning but don't fail the operation
-        System.err.println(
-            "Warning: Could not update sequence range for current file: " + e.getMessage());
+        logger.warn("Could not update sequence range for current file: {}", e.getMessage(), e);
       }
     }
   }
@@ -793,6 +811,11 @@ public class FileBasedWAL implements WriteAheadLog {
 
   @Override
   public void close() throws Exception {
+    logger.info(
+        "Closing FileBasedWAL: currentSequence={}, totalFiles={}",
+        currentSequenceNumber,
+        walFiles.size());
+
     lock.writeLock().lock();
     try {
       // Update sequence range for current file before closing
@@ -805,6 +828,7 @@ public class FileBasedWAL implements WriteAheadLog {
         sequenceFileRAF.getFD().sync();
         sequenceFileRAF.close();
         sequenceFileRAF = null;
+        logger.debug("Sequence file closed and synced");
       }
 
       // Close and sync current log file
@@ -813,7 +837,10 @@ public class FileBasedWAL implements WriteAheadLog {
         currentFile.getFD().sync();
         currentFile.close();
         currentFile = null;
+        logger.debug("Current WAL file closed and synced");
       }
+
+      logger.info("FileBasedWAL closed successfully");
     } finally {
       lock.writeLock().unlock();
     }

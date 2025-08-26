@@ -25,7 +25,6 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @Tag("performance")
 class WALPerformanceTest {
-
   // Configuration
   private static final int TOTAL_ENTRIES = 100_000;
   private static final int ENTRY_SIZE_BYTES = 1024; // 1KB per entry - configurable
