@@ -13,19 +13,19 @@ import java.util.List;
 public interface WriteAheadLog extends AutoCloseable {
 
   /**
-   * Create and append a single entry atomically with auto-generated sequence number.
-   * This method is thread-safe and handles sequence number generation internally.
-   * 
+   * Create and append a single entry atomically with auto-generated sequence number. This method is
+   * thread-safe and handles sequence number generation internally.
+   *
    * @param data the data to store in the entry
    * @return the created WALEntry with assigned sequence number
    * @throws WALException if the operation fails
    */
   WALEntry createAndAppend(ByteBuffer data) throws WALException;
-  
+
   /**
-   * Create and append multiple entries atomically with auto-generated sequence numbers.
-   * This method is thread-safe and handles sequence number generation internally.
-   * 
+   * Create and append multiple entries atomically with auto-generated sequence numbers. This method
+   * is thread-safe and handles sequence number generation internally.
+   *
    * @param dataList list of data to store in entries
    * @return list of created WALEntries with assigned sequence numbers
    * @throws WALException if the operation fails

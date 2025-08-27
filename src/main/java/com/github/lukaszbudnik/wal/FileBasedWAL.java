@@ -8,6 +8,8 @@ import java.util.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * File-based implementation of Write Ahead Log.
@@ -20,12 +22,14 @@ import java.util.zip.CRC32;
  * sequence number that always increments (even after restart)
  */
 public class FileBasedWAL implements WriteAheadLog {
+  private static final Logger logger = LoggerFactory.getLogger(FileBasedWAL.class);
 
   private static final String WAL_FILE_PREFIX = "wal-";
   private static final String WAL_FILE_SUFFIX = ".log";
   private static final String SEQUENCE_FILE_NAME = "sequence.dat";
   private static final int DEFAULT_MAX_FILE_SIZE = 64 * 1024 * 1024; // 64MB
-  private static final int ENTRY_HEADER_SIZE = 24; // 8+8+4+4 bytes for seq, timestamp_sec, timestamp_ns, data_length
+  private static final int ENTRY_HEADER_SIZE =
+      24; // 8+8+4+4 bytes for seq, timestamp_sec, timestamp_ns, data_length
 
   private final Path walDirectory;
   private final Path sequenceFile;
@@ -33,6 +37,7 @@ public class FileBasedWAL implements WriteAheadLog {
   private final boolean syncOnWrite;
   private final ReadWriteLock lock = new ReentrantReadWriteLock();
   private final Map<Integer, Path> walFiles = new TreeMap<>();
+  private final Map<Integer, SequenceTimestampRange> fileSequenceRanges = new TreeMap<>();
   private volatile long currentSequenceNumber = -1;
   private volatile int currentFileIndex = 0;
   private RandomAccessFile currentFile;
@@ -48,20 +53,31 @@ public class FileBasedWAL implements WriteAheadLog {
     this.maxFileSize = maxFileSize;
     this.syncOnWrite = syncOnWrite;
 
+    logger.info(
+        "Initializing FileBasedWAL: directory={}, maxFileSize={} bytes, syncOnWrite={}",
+        walDirectory,
+        maxFileSize,
+        syncOnWrite);
+
     try {
       Files.createDirectories(walDirectory);
       initialize();
+      logger.info(
+          "FileBasedWAL initialized successfully: currentSequence={}, currentFileIndex={}, files={}",
+          currentSequenceNumber,
+          currentFileIndex,
+          walFiles.size());
     } catch (IOException e) {
+      logger.error("Failed to initialize WAL in directory {}: {}", walDirectory, e.getMessage(), e);
       throw new WALException("Failed to initialize WAL", e);
     }
   }
 
   private void initialize() throws IOException, WALException {
-    // Load the persistent sequence number
-    loadSequenceNumber();
-    
     // Open sequence file for reuse (create if doesn't exist)
     sequenceFileRAF = new RandomAccessFile(sequenceFile.toFile(), "rw");
+
+    loadSequenceNumber();
 
     // Discover existing WAL files
     try (DirectoryStream<Path> stream =
@@ -74,16 +90,18 @@ public class FileBasedWAL implements WriteAheadLog {
       }
     }
 
+    // Build sequence range mapping for existing files
+    buildSequenceRangeMapping();
+
     // Open or create the current file
     openCurrentFile();
   }
 
   private void loadSequenceNumber() throws IOException {
-    if (Files.exists(sequenceFile)) {
-      try (DataInputStream dis = new DataInputStream(Files.newInputStream(sequenceFile))) {
-        currentSequenceNumber = dis.readLong();
-      }
-    } else {
+    sequenceFileRAF.seek(0);
+    try {
+      currentSequenceNumber = sequenceFileRAF.readLong();
+    } catch (IOException e) {
       currentSequenceNumber = -1;
     }
   }
@@ -92,7 +110,7 @@ public class FileBasedWAL implements WriteAheadLog {
     if (sequenceFileRAF != null) {
       sequenceFileRAF.seek(0);
       sequenceFileRAF.writeLong(currentSequenceNumber);
-      
+
       // Respect syncOnWrite flag for consistency
       if (syncOnWrite) {
         sequenceFileRAF.getFD().sync();
@@ -104,6 +122,111 @@ public class FileBasedWAL implements WriteAheadLog {
     String indexStr =
         fileName.substring(WAL_FILE_PREFIX.length(), fileName.length() - WAL_FILE_SUFFIX.length());
     return Integer.parseInt(indexStr);
+  }
+
+  /**
+   * Builds sequence range mapping for all existing WAL files. This enables efficient file selection
+   * during range queries.
+   *
+   * <p>OPTIMIZATION: Only reads the first entry of each file and derives max values from the next
+   * file's first entry. This provides massive performance improvement over scanning entire files.
+   */
+  private void buildSequenceRangeMapping() throws WALException {
+    fileSequenceRanges.clear();
+
+    List<Integer> fileIndices = new ArrayList<>(walFiles.keySet());
+    Collections.sort(fileIndices);
+
+    for (int i = 0; i < fileIndices.size(); i++) {
+      Integer currentFileIndex = fileIndices.get(i);
+      Integer nextFileIndex = (i + 1 < fileIndices.size()) ? fileIndices.get(i + 1) : null;
+
+      try {
+        SequenceTimestamp currentFirst = readFirstEntry(currentFileIndex);
+        if (currentFirst == null) {
+          continue; // Skip empty files
+        }
+
+        SequenceTimestampRange range;
+        if (nextFileIndex != null) {
+          // Derive max values from next file's first entry
+          SequenceTimestamp nextFirst = readFirstEntry(nextFileIndex);
+          if (nextFirst != null) {
+            // Max values are "just before" next file's min values
+            long maxSequence = nextFirst.sequence - 1;
+            Instant maxTimestamp = nextFirst.timestamp.minusNanos(1);
+
+            range =
+                new SequenceTimestampRange(
+                    currentFirst.sequence, maxSequence,
+                    currentFirst.timestamp, maxTimestamp);
+          } else {
+            // Next file is empty, treat current as last file
+            range = createRangeForLastFile(currentFirst);
+          }
+        } else {
+          // This is the last file - use current WAL state
+          range = createRangeForLastFile(currentFirst);
+        }
+
+        fileSequenceRanges.put(currentFileIndex, range);
+
+      } catch (Exception e) {
+        // If we can't read the file, skip it but log the issue
+        logger.warn(
+            "Could not read sequence range from file {}: {}", currentFileIndex, e.getMessage(), e);
+      }
+    }
+  }
+
+  /**
+   * Creates a sequence range for the last file using current WAL state. Since we can't derive max
+   * from next file, we use currentSequenceNumber.
+   */
+  private SequenceTimestampRange createRangeForLastFile(SequenceTimestamp first) {
+    // Use current sequence number as max (this is accurate for the last file)
+    long maxSequence = Math.max(first.sequence, currentSequenceNumber);
+
+    // For timestamp, we use current time as a conservative upper bound
+    // This ensures we don't miss any entries in timestamp-based queries
+    Instant maxTimestamp = Instant.now();
+
+    return new SequenceTimestampRange(
+        first.sequence, maxSequence,
+        first.timestamp, maxTimestamp);
+  }
+
+  /**
+   * Efficiently reads only the first entry from a WAL file. This is much faster than scanning the
+   * entire file.
+   */
+  private SequenceTimestamp readFirstEntry(Integer fileIndex) throws WALException {
+    Path filePath = walFiles.get(fileIndex);
+    if (filePath == null || !Files.exists(filePath)) {
+      return null;
+    }
+
+    try (RandomAccessFile file = new RandomAccessFile(filePath.toFile(), "r")) {
+      if (file.length() < ENTRY_HEADER_SIZE) {
+        return null; // File too small to contain a valid entry
+      }
+
+      // Read first entry header
+      file.seek(0);
+
+      // Read sequence number (8 bytes)
+      long sequenceNumber = file.readLong();
+
+      // Read timestamp (8 bytes seconds + 4 bytes nanos)
+      long timestampSeconds = file.readLong();
+      int timestampNanos = file.readInt();
+      Instant timestamp = Instant.ofEpochSecond(timestampSeconds, timestampNanos);
+
+      return new SequenceTimestamp(sequenceNumber, timestamp);
+
+    } catch (IOException e) {
+      throw new WALException("Failed to read first entry from " + filePath, e);
+    }
   }
 
   private void openCurrentFile() throws IOException {
@@ -125,10 +248,10 @@ public class FileBasedWAL implements WriteAheadLog {
     try {
       long nextSeq = currentSequenceNumber + 1;
       WALEntry entry = new WALEntry(nextSeq, Instant.now(), data);
-      
+
       // Use private append method
       appendInternal(entry);
-      
+
       return entry;
     } finally {
       lock.writeLock().unlock();
@@ -145,7 +268,7 @@ public class FileBasedWAL implements WriteAheadLog {
     try {
       List<WALEntry> entries = new ArrayList<>(dataList.size());
       long nextSeq = currentSequenceNumber + 1;
-      
+
       // Create all entries with consecutive sequence numbers
       for (ByteBuffer data : dataList) {
         WALEntry entry = new WALEntry(nextSeq++, Instant.now(), data);
@@ -154,26 +277,16 @@ public class FileBasedWAL implements WriteAheadLog {
 
       // Use private appendBatch method
       appendBatchInternal(entries);
-      
+
       return entries;
     } finally {
       lock.writeLock().unlock();
     }
   }
-  
+
   // Internal method for appending a single entry (used by createAndAppend)
   private void appendInternal(WALEntry entry) throws WALException {
     try {
-      // Ensure sequence number is always incrementing
-      long nextSeq = currentSequenceNumber + 1;
-      if (entry.getSequenceNumber() != nextSeq) {
-        throw new WALException(
-            "Invalid sequence number. Expected: "
-                + nextSeq
-                + ", got: "
-                + entry.getSequenceNumber());
-      }
-
       writeEntry(entry);
       currentSequenceNumber = entry.getSequenceNumber();
 
@@ -192,23 +305,10 @@ public class FileBasedWAL implements WriteAheadLog {
       throw new WALException("Failed to append entry", e);
     }
   }
-  
+
   // Internal method for appending multiple entries (used by createAndAppendBatch)
   private void appendBatchInternal(List<WALEntry> entries) throws WALException {
     try {
-      // Validate sequence numbers
-      long expectedSeq = currentSequenceNumber + 1;
-      for (WALEntry entry : entries) {
-        if (entry.getSequenceNumber() != expectedSeq) {
-          throw new WALException(
-              "Invalid sequence number in batch. Expected: "
-                  + expectedSeq
-                  + ", got: "
-                  + entry.getSequenceNumber());
-        }
-        expectedSeq++;
-      }
-
       for (WALEntry entry : entries) {
         writeEntry(entry);
         currentSequenceNumber = entry.getSequenceNumber();
@@ -236,8 +336,38 @@ public class FileBasedWAL implements WriteAheadLog {
   }
 
   private void rotateFile() throws IOException {
+    logger.info("Rotating WAL file from index {} to {}", currentFileIndex, currentFileIndex + 1);
+
+    // Update sequence range for the file we're rotating away from
+    updateSequenceRangeForCurrentFile();
+
     currentFileIndex++;
     openCurrentFile();
+
+    logger.debug(
+        "File rotation completed: new file index={}, total files={}",
+        currentFileIndex,
+        walFiles.size());
+  }
+
+  /**
+   * Updates the sequence range mapping for the current file. Called when rotating files or closing
+   * WAL.
+   */
+  private void updateSequenceRangeForCurrentFile() {
+    if (currentFileIndex >= 0 && walFiles.containsKey(currentFileIndex)) {
+      try {
+        SequenceTimestamp first = readFirstEntry(currentFileIndex);
+        if (first != null) {
+          // For current file, we know the exact range since we're actively writing to it
+          SequenceTimestampRange range = createRangeForLastFile(first);
+          fileSequenceRanges.put(currentFileIndex, range);
+        }
+      } catch (WALException e) {
+        // Log warning but don't fail the operation
+        logger.warn("Could not update sequence range for current file: {}", e.getMessage(), e);
+      }
+    }
   }
 
   /**
@@ -345,20 +475,112 @@ public class FileBasedWAL implements WriteAheadLog {
     try {
       List<WALEntry> entries = new ArrayList<>();
 
-      for (Map.Entry<Integer, Path> fileEntry : walFiles.entrySet()) {
-        Path filePath = fileEntry.getValue();
+      // Use sequence range mapping to efficiently select relevant files
+      List<Integer> relevantFiles = findRelevantFiles(fromSequenceNumber, toSequenceNumber);
+
+      for (Integer fileIndex : relevantFiles) {
+        Path filePath = walFiles.get(fileIndex);
         if (Files.exists(filePath)) {
           entries.addAll(readEntriesFromFile(filePath, fromSequenceNumber, toSequenceNumber));
         }
       }
-
-      // Sort by sequence number to ensure correct order
-      entries.sort(Comparator.comparingLong(WALEntry::getSequenceNumber));
-
       return entries;
     } finally {
       lock.readLock().unlock();
     }
+  }
+
+  /**
+   * Efficiently finds files that contain entries in the given sequence range. Uses sequence range
+   * mapping to avoid reading irrelevant files.
+   */
+  private List<Integer> findRelevantFiles(long fromSequenceNumber, long toSequenceNumber) {
+    List<Integer> relevantFiles = new ArrayList<>();
+
+    // If no sequence range mapping is available, fall back to reading all files
+    if (fileSequenceRanges.isEmpty()) {
+      relevantFiles.addAll(walFiles.keySet());
+      return relevantFiles;
+    }
+
+    // Find files whose sequence ranges overlap with the requested range
+    for (Map.Entry<Integer, SequenceTimestampRange> entry : fileSequenceRanges.entrySet()) {
+      Integer fileIndex = entry.getKey();
+      SequenceTimestampRange range = entry.getValue();
+
+      if (range.overlaps(fromSequenceNumber, toSequenceNumber)) {
+        relevantFiles.add(fileIndex);
+      }
+    }
+
+    // Also include current file if it exists and might contain relevant data
+    if (currentFileIndex >= 0 && walFiles.containsKey(currentFileIndex)) {
+      // Current file might not be in sequence ranges yet if it's being written to
+      if (!relevantFiles.contains(currentFileIndex)) {
+        // Check if current file could contain sequences in our range
+        // Current file contains sequences from the last known max up to currentSequenceNumber
+        long currentFileMinSeq = getCurrentFileMinSequence();
+        if (currentFileMinSeq <= toSequenceNumber && currentSequenceNumber >= fromSequenceNumber) {
+          relevantFiles.add(currentFileIndex);
+        }
+      }
+    }
+
+    // Sort file indices to read in order
+    relevantFiles.sort(Integer::compareTo);
+
+    return relevantFiles;
+  }
+
+  /**
+   * Efficiently finds files that contain entries in the given timestamp range. Uses timestamp range
+   * mapping to avoid reading irrelevant files.
+   */
+  private List<Integer> findRelevantFilesForTimestamp(Instant fromTimestamp, Instant toTimestamp) {
+    List<Integer> relevantFiles = new ArrayList<>();
+
+    // If no sequence range mapping is available, fall back to reading all files
+    if (fileSequenceRanges.isEmpty()) {
+      relevantFiles.addAll(walFiles.keySet());
+      return relevantFiles;
+    }
+
+    // Find files whose timestamp ranges overlap with the requested range
+    for (Map.Entry<Integer, SequenceTimestampRange> entry : fileSequenceRanges.entrySet()) {
+      Integer fileIndex = entry.getKey();
+      SequenceTimestampRange range = entry.getValue();
+
+      if (range.overlaps(fromTimestamp, toTimestamp)) {
+        relevantFiles.add(fileIndex);
+      }
+    }
+
+    // Also include current file if it exists and might contain relevant data
+    if (currentFileIndex >= 0 && walFiles.containsKey(currentFileIndex)) {
+      // Current file might not be in timestamp ranges yet if it's being written to
+      if (!relevantFiles.contains(currentFileIndex)) {
+        // For current file, we need to be conservative and include it
+        // since we don't know its exact timestamp range until it's closed
+        relevantFiles.add(currentFileIndex);
+      }
+    }
+
+    // Sort file indices to read in order
+    relevantFiles.sort(Integer::compareTo);
+
+    return relevantFiles;
+  }
+
+  /** Estimates the minimum sequence number in the current file. */
+  private long getCurrentFileMinSequence() {
+    // Find the maximum sequence from all completed files
+    long maxFromCompletedFiles = -1;
+    for (SequenceTimestampRange range : fileSequenceRanges.values()) {
+      maxFromCompletedFiles = Math.max(maxFromCompletedFiles, range.getMaxSequence());
+    }
+
+    // Current file starts after the last completed file
+    return maxFromCompletedFiles + 1;
   }
 
   private List<WALEntry> readEntriesFromFile(Path filePath, long fromSeq, long toSeq)
@@ -377,11 +599,11 @@ public class FileBasedWAL implements WriteAheadLog {
 
         // Read sequence number to check if we want this entry
         long sequenceNumber = file.readLong();
-        
+
         // Read timestamp fields (we need to read them to get to data length)
         file.readLong(); // timestamp seconds
-        file.readInt();  // timestamp nanoseconds
-        
+        file.readInt(); // timestamp nanoseconds
+
         // Read data length
         int dataLength = file.readInt();
         if (dataLength < 0 || position + ENTRY_HEADER_SIZE + dataLength + 4 > file.length()) {
@@ -428,8 +650,11 @@ public class FileBasedWAL implements WriteAheadLog {
         return entries; // Invalid range
       }
 
-      for (Map.Entry<Integer, Path> fileEntry : walFiles.entrySet()) {
-        Path filePath = fileEntry.getValue();
+      // Use timestamp range mapping to efficiently select relevant files
+      List<Integer> relevantFiles = findRelevantFilesForTimestamp(fromTimestamp, toTimestamp);
+
+      for (Integer fileIndex : relevantFiles) {
+        Path filePath = walFiles.get(fileIndex);
         if (Files.exists(filePath)) {
           entries.addAll(readEntriesFromFileByTimestamp(filePath, fromTimestamp, toTimestamp));
         }
@@ -444,8 +669,8 @@ public class FileBasedWAL implements WriteAheadLog {
     }
   }
 
-  private List<WALEntry> readEntriesFromFileByTimestamp(Path filePath, Instant fromTimestamp, Instant toTimestamp)
-      throws WALException {
+  private List<WALEntry> readEntriesFromFileByTimestamp(
+      Path filePath, Instant fromTimestamp, Instant toTimestamp) throws WALException {
     List<WALEntry> entries = new ArrayList<>();
 
     try (RandomAccessFile file = new RandomAccessFile(filePath.toFile(), "r")) {
@@ -463,7 +688,7 @@ public class FileBasedWAL implements WriteAheadLog {
         long timestampSeconds = file.readLong();
         int timestampNanos = file.readInt();
         int dataLength = file.readInt();
-        
+
         if (dataLength < 0 || position + ENTRY_HEADER_SIZE + dataLength + 4 > file.length()) {
           break;
         }
@@ -552,11 +777,11 @@ public class FileBasedWAL implements WriteAheadLog {
         // Read sequence number directly
         long sequenceNumber = file.readLong();
         maxSeq = Math.max(maxSeq, sequenceNumber);
-        
+
         // Read timestamp fields to get to data length
         file.readLong(); // timestamp seconds
-        file.readInt();  // timestamp nanoseconds
-        
+        file.readInt(); // timestamp nanoseconds
+
         // Read data length
         int dataLength = file.readInt();
         if (dataLength < 0 || position + ENTRY_HEADER_SIZE + dataLength + 4 > file.length()) {
@@ -586,8 +811,16 @@ public class FileBasedWAL implements WriteAheadLog {
 
   @Override
   public void close() throws Exception {
+    logger.info(
+        "Closing FileBasedWAL: currentSequence={}, totalFiles={}",
+        currentSequenceNumber,
+        walFiles.size());
+
     lock.writeLock().lock();
     try {
+      // Update sequence range for current file before closing
+      updateSequenceRangeForCurrentFile();
+
       // Ensure final sequence number is saved
       if (sequenceFileRAF != null) {
         saveSequenceNumber();
@@ -595,15 +828,19 @@ public class FileBasedWAL implements WriteAheadLog {
         sequenceFileRAF.getFD().sync();
         sequenceFileRAF.close();
         sequenceFileRAF = null;
+        logger.debug("Sequence file closed and synced");
       }
-      
+
       // Close and sync current log file
       if (currentFile != null) {
         // Always sync log file on close for durability
         currentFile.getFD().sync();
         currentFile.close();
         currentFile = null;
+        logger.debug("Current WAL file closed and synced");
       }
+
+      logger.info("FileBasedWAL closed successfully");
     } finally {
       lock.writeLock().unlock();
     }
