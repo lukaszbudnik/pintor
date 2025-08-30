@@ -10,7 +10,7 @@ class WALPageHeaderTest {
   @Test
   void testPageHeaderCreationAndSerialization() throws WALException {
     Instant now = Instant.now();
-    Instant later = now.plusSeconds(10).plusNanos(123456789);
+    Instant later = now.plusSeconds(10).plusMillis(123);
 
     WALPageHeader header =
         new WALPageHeader(100L, 200L, now, later, (short) 5, WALPageHeader.NO_CONTINUATION);
@@ -18,29 +18,31 @@ class WALPageHeaderTest {
     // Test getters
     assertEquals(100L, header.getFirstSequence());
     assertEquals(200L, header.getLastSequence());
-    assertEquals(now, header.getFirstTimestamp());
-    assertEquals(later, header.getLastTimestamp());
+    assertEquals(now.toEpochMilli(), header.getFirstTimestamp().toEpochMilli());
+    assertEquals(later.toEpochMilli(), header.getLastTimestamp().toEpochMilli());
     assertEquals(5, header.getEntryCount());
     assertEquals(WALPageHeader.NO_CONTINUATION, header.getContinuationFlags());
 
     // Test serialization/deserialization
     byte[] serialized = header.serialize();
     assertEquals(WALPageHeader.HEADER_SIZE, serialized.length);
-    assertEquals(52, serialized.length); // Verify correct header size
+    assertEquals(44, serialized.length); // Verify correct header size
 
     WALPageHeader deserialized = WALPageHeader.deserialize(serialized);
     assertEquals(header.getFirstSequence(), deserialized.getFirstSequence());
     assertEquals(header.getLastSequence(), deserialized.getLastSequence());
-    assertEquals(header.getFirstTimestamp(), deserialized.getFirstTimestamp());
-    assertEquals(header.getLastTimestamp(), deserialized.getLastTimestamp());
+    assertEquals(
+        header.getFirstTimestamp().toEpochMilli(), deserialized.getFirstTimestamp().toEpochMilli());
+    assertEquals(
+        header.getLastTimestamp().toEpochMilli(), deserialized.getLastTimestamp().toEpochMilli());
     assertEquals(header.getEntryCount(), deserialized.getEntryCount());
     assertEquals(header.getContinuationFlags(), deserialized.getContinuationFlags());
   }
 
   @Test
-  void testNanosecondPrecision() throws WALException {
-    // Test that nanosecond precision is preserved
-    Instant precise = Instant.ofEpochSecond(1693123456L, 987654321);
+  void testMillisecondPrecision() throws WALException {
+    // Test that millisecond precision is preserved
+    Instant precise = Instant.ofEpochMilli(1693123456987L);
 
     WALPageHeader header =
         new WALPageHeader(1L, 1L, precise, precise, (short) 1, WALPageHeader.NO_CONTINUATION);
@@ -48,9 +50,9 @@ class WALPageHeaderTest {
     byte[] serialized = header.serialize();
     WALPageHeader deserialized = WALPageHeader.deserialize(serialized);
 
-    assertEquals(precise, deserialized.getFirstTimestamp());
-    assertEquals(precise, deserialized.getLastTimestamp());
-    assertEquals(987654321, deserialized.getFirstTimestamp().getNano());
+    assertEquals(precise.toEpochMilli(), deserialized.getFirstTimestamp().toEpochMilli());
+    assertEquals(precise.toEpochMilli(), deserialized.getLastTimestamp().toEpochMilli());
+    assertEquals(1693123456987L, deserialized.getFirstTimestamp().toEpochMilli());
   }
 
   @Test
@@ -145,6 +147,6 @@ class WALPageHeaderTest {
 
   @Test
   void testHeaderSizeConstant() {
-    assertEquals(52, WALPageHeader.HEADER_SIZE);
+    assertEquals(44, WALPageHeader.HEADER_SIZE);
   }
 }

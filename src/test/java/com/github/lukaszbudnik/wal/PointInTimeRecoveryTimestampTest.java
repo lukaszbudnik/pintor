@@ -164,11 +164,16 @@ class PointInTimeRecoveryTimestampTest {
     // Test that entries created in rapid succession maintain proper ordering
 
     Instant start = Instant.now();
+    // Wait a bit to ensure timestamps are different
+    Thread.sleep(10);
 
     // Create entries rapidly
     WALEntry entry1 = walManager.createEntry("rapid1".getBytes());
     WALEntry entry2 = walManager.createEntry("rapid2".getBytes());
     WALEntry entry3 = walManager.createEntry("rapid3".getBytes());
+
+    // Wait a bit to ensure timestamps are different
+    Thread.sleep(10);
 
     Instant end = Instant.now();
 

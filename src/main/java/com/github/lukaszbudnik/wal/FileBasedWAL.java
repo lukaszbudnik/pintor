@@ -20,8 +20,8 @@ public class FileBasedWAL implements WriteAheadLog {
 
   // Page constants
   static final int PAGE_SIZE = 4096; // 4KB pages
-  static final int PAGE_DATA_SIZE = PAGE_SIZE - WALPageHeader.HEADER_SIZE; // 4044 bytes
-  static final int ENTRY_HEADER_SIZE = 29; // 1+8+8+4+4+4 bytes
+  static final int PAGE_DATA_SIZE = PAGE_SIZE - WALPageHeader.HEADER_SIZE; // 4052 bytes
+  static final int ENTRY_HEADER_SIZE = 25; // 1+8+8+4+4 bytes
 
   // File constants
   private static final String WAL_FILE_PREFIX = "wal-";
@@ -289,15 +289,14 @@ public class FileBasedWAL implements WriteAheadLog {
     ByteBuffer dataBuffer = entry.getData();
     int dataLength = dataBuffer != null ? dataBuffer.remaining() : 0;
 
-    // Calculate total size: 1+8+8+4+4+dataLength+4 = 29 + dataLength
-    int totalSize = 29 + dataLength;
+    // Calculate total size
+    int totalSize = ENTRY_HEADER_SIZE + dataLength;
     ByteBuffer buffer = ByteBuffer.allocate(totalSize);
 
     // Write entry fields
     buffer.put(DATA_ENTRY);
     buffer.putLong(entry.getSequenceNumber());
-    buffer.putLong(entry.getTimestamp().getEpochSecond());
-    buffer.putInt(entry.getTimestamp().getNano());
+    buffer.putLong(entry.getTimestamp().toEpochMilli());
     buffer.putInt(dataLength);
 
     if (dataBuffer != null) {
@@ -511,8 +510,7 @@ public class FileBasedWAL implements WriteAheadLog {
       if (entryType == 0) break; // Padding
 
       long sequence = file.readLong();
-      long timestampSeconds = file.readLong();
-      int timestampNanos = file.readInt();
+      long timestampMillis = file.readLong();
       int dataLength = file.readInt();
 
       if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
@@ -526,7 +524,7 @@ public class FileBasedWAL implements WriteAheadLog {
 
       // Filter by sequence range
       if (sequence >= fromSeq && sequence <= toSeq) {
-        Instant timestamp = Instant.ofEpochSecond(timestampSeconds, timestampNanos);
+        Instant timestamp = Instant.ofEpochMilli(timestampMillis);
         ByteBuffer dataBuffer = dataLength > 0 ? ByteBuffer.wrap(data) : null;
         entries.add(new WALEntry(sequence, timestamp, dataBuffer));
       }
@@ -682,8 +680,7 @@ public class FileBasedWAL implements WriteAheadLog {
       if (entryType == 0) break; // Padding
 
       long sequence = file.readLong();
-      long timestampSeconds = file.readLong();
-      int timestampNanos = file.readInt();
+      long timestampMillis = file.readLong();
       int dataLength = file.readInt();
 
       if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
@@ -696,7 +693,7 @@ public class FileBasedWAL implements WriteAheadLog {
       int crc = file.readInt();
 
       // Filter by timestamp range
-      Instant timestamp = Instant.ofEpochSecond(timestampSeconds, timestampNanos);
+      Instant timestamp = Instant.ofEpochMilli(timestampMillis);
       if (!timestamp.isBefore(fromTs) && !timestamp.isAfter(toTs)) {
         ByteBuffer dataBuffer = dataLength > 0 ? ByteBuffer.wrap(data) : null;
         entries.add(new WALEntry(sequence, timestamp, dataBuffer));
@@ -769,8 +766,7 @@ public class FileBasedWAL implements WriteAheadLog {
         }
 
         long sequenceNumber = file.readLong();
-        file.readLong(); // timestamp seconds
-        file.readInt(); // timestamp nanos
+        file.readLong(); // timestamp milliseconds
         int dataLength = file.readInt();
 
         if (dataLength >= 0 && position + ENTRY_HEADER_SIZE + dataLength <= file.length()) {

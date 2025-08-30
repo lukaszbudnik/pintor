@@ -573,29 +573,37 @@ class FileBasedWALTest {
   void testTimestampBasedReading() throws WALException, InterruptedException {
     // Create entries with some time gaps to test timestamp-based reading
     Instant startTime = Instant.now();
+    // Wait longer to ensure different timestamps with millisecond precision
+    Thread.sleep(10);
 
     WALEntry entry1 = wal.createAndAppend(ByteBuffer.wrap("entry1".getBytes()));
 
-    // Wait a bit to ensure different timestamps
+    // Wait longer to ensure different timestamps with millisecond precision
     Thread.sleep(10);
+
     Instant midTime = Instant.now();
+    // Wait longer to ensure different timestamps with millisecond precision
+    Thread.sleep(10);
 
     WALEntry entry2 = wal.createAndAppend(ByteBuffer.wrap("entry2".getBytes()));
     WALEntry entry3 = wal.createAndAppend(ByteBuffer.wrap("entry3".getBytes()));
 
+    // Wait longer to ensure different timestamps with millisecond precision
     Thread.sleep(10);
     Instant endTime = Instant.now();
+    // Wait longer to ensure different timestamps with millisecond precision
+    Thread.sleep(10);
 
     WALEntry entry4 = wal.createAndAppend(ByteBuffer.wrap("entry4".getBytes()));
 
     // Test readFrom(timestamp)
     List<WALEntry> fromMid = wal.readFrom(midTime);
-    assertTrue(fromMid.size() >= 3); // Should include entry2, entry3, entry4
+    assertEquals(3, fromMid.size()); // Should include entry2, entry3, entry4
     assertEquals("entry2", new String(fromMid.get(0).getDataAsBytes()));
 
     // Test readRange(timestamp, timestamp)
     List<WALEntry> midRange = wal.readRange(midTime, endTime);
-    assertTrue(midRange.size() >= 2); // Should include entry2, entry3
+    assertEquals(2, midRange.size()); // Should include entry2, entry3
     assertEquals("entry2", new String(midRange.get(0).getDataAsBytes()));
     assertEquals("entry3", new String(midRange.get(1).getDataAsBytes()));
 
