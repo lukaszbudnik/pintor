@@ -157,6 +157,8 @@ class ThreadSafetyIntegrationTest {
       assertEquals(i, sequenceNumbers.get(i));
     }
 
+    walManager.sync();
+
     // Verify persistence
     List<WALEntry> persistedEntries = walManager.readFrom(0L);
     assertEquals(numThreads * batchSize, persistedEntries.size());
@@ -222,6 +224,8 @@ class ThreadSafetyIntegrationTest {
 
     executor.shutdown();
     assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+
+    walManager.sync();
 
     // Verify total count and sequence integrity
     List<WALEntry> allEntries = walManager.readFrom(0L);
