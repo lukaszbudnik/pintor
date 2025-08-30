@@ -121,9 +121,6 @@ public class WALManager implements AutoCloseable {
 
   @Override
   public void close() throws Exception {
-    logger.info("Closing WALManager");
-    sync();
     wal.close();
-    logger.info("WALManager closed successfully");
   }
 }

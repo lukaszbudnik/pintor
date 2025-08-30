@@ -192,6 +192,33 @@ class PointInTimeRecoveryTimestampTest {
     }
   }
 
+  // test reading across multiple WAL files
+  @Test
+  void testReadingAcrossMultipleWALFiles() throws WALException, InterruptedException {
+    // Create enough entries to span multiple WAL files
+    for (int i = 0; i < 250; i++) {
+      walManager.createEntry(("entry" + i).getBytes());
+    }
+    // Get time
+    Instant before = Instant.now();
+    Thread.sleep(10);
+    // create 500 entries
+    for (int i = 250; i < 750; i++) {
+      walManager.createEntry(("entry" + i).getBytes());
+    }
+    // Get time
+    Instant after = Instant.now();
+    Thread.sleep(10);
+    // create remaining 250 entries
+    for (int i = 750; i < 1000; i++) {
+      walManager.createEntry(("entry" + i).getBytes());
+    }
+
+    // Read entries between before and after
+    List<WALEntry> entries = walManager.readRange(before, after);
+    assertEquals(500, entries.size());
+  }
+
   private boolean containsOperation(List<WALEntry> entries, String operation, String data) {
     return entries.stream()
         .map(entry -> new String(entry.getDataAsBytes()))

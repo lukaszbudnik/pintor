@@ -98,94 +98,112 @@ try (WALManager walManager = new WALManager(walDir)) {
 }
 ```
 
-## Key features in details
-
-### 🔒 Thread Safety
-
-Built for high-concurrency environments with zero-compromise thread safety:
-
-- **Lock-free reads** - Multiple threads read simultaneously without blocking
-- **Atomic writes** - Entry creation is fully atomic with no race conditions
-- **Smart locking** - ReadWriteLock ensures writers get exclusive access when needed
-- **Thread-safe recovery** - Restart and resume operations from any thread
-- **Automatic coordination** - No manual synchronization required
-
-### ⚡ Performance
-
-Engineered for speed with enterprise-grade optimizations:
-
-- **Millisecond restarts** - 10,000x faster initialization via optimized range building
-- **Binary efficiency** - Custom format outperforms Java serialization
-- **Batch operations** - Process thousands of entries in single atomic operations
-- **O(1) operations** - Size queries and sequence generation with constant time
-- **Smart file rotation** - Prevents large file performance degradation
-- **Zero-copy reads** - Direct ByteBuffer access eliminates unnecessary allocations
-- **Intelligent caching** - File-to-sequence mapping for lightning-fast range queries
-
-### 🛡️ Reliability
-
-Production-hardened with bulletproof recovery guarantees:
-
-- **Crash-safe writes** - All committed entries survive system failures
-- **Self-healing** - Automatic detection and recovery from corrupted entries
-- **Monotonic sequences** - Guaranteed ordering with no duplicates across restarts
-- **Integrity verification** - CRC32 checksums on every entry
-- **Graceful degradation** - Continues operation even with partial file corruption
-- **Zero data loss** - Configurable sync policies ensure durability guarantees
-
-## Flexible Data Handling
-
-Pintor's data entries are intentionally designed to use `ByteBuffer` (or `byte[]`) to maximize flexibility. This allows developers to send any data structure—such as JSON, serialized objects, or custom binary formats—without being constrained by a rigid schema. For example, you can include custom fields like transaction IDs, operation types, or metadata in the payload. These fields can later be used for custom filtering during reads or recovery, enabling application-specific logic like transaction tracking or selective replay.
-
-### Using byte[] and ByteBuffer APIs
-
-Use `byte[]` for simple payloads like JSON or serialized objects, ideal for quick prototyping. Use `ByteBuffer` for structured or high-performance data, enabling precise control over binary formats.
-
-#### Example: JSON with byte[]
-```java
-try (WALManager walManager = new WALManager(Paths.get("/path/to/wal"))) {
-    byte[] jsonData = "{\"txnId\":\"txn_4001\",\"operation\":\"INSERT\"}".getBytes();
-    WALEntry entry = walManager.createEntry(jsonData);
-}
-```
-
-#### Example: Structured Data with ByteBuffer
-```java
-try (WALManager walManager = new WALManager(Paths.get("/path/to/wal"))) {
-    ByteBuffer buffer = ByteBuffer.allocate(128)
-        .putInt(4001) // Transaction ID
-        .put("INSERT".getBytes());
-    buffer.flip();
-    WALEntry entry = walManager.createEntry(buffer);
-}
-```
-
 ## Architecture
 
 ### Core Components
 
-- **WALEntry**: POJO for log entries (sequence, timestamp, data).
+- **WALPageHeader**: POJO for the page header with sequence/timestamp ranges, entry count, and CRC32. Enables O(1) recovery and efficient range queries.
+- **WALEntry**: POJO for the actual log entry. Immutable data record containing sequence number, timestamp, and user data (ByteBuffer).
 - **WriteAheadLog**: Interface for WAL contracts.
-- **FileBasedWAL**: Binary implementation with rotation and CRC32.
-- **WALManager**: Thread-safe high-level API.
+- **FileBasedWAL**: File-based implementation with rotation and CRC32.
+- **WALManager**: Thread-safe high-level API providing entry creation, batch operations, reading, and recovery. Wraps FileBasedWAL with simplified interface and automatic resource management.
 
 ### Storage Format
 
-**1. WAL Log Files: `wal-{index}.log`**
+**Page-Based WAL Format**
 
-Contains the actual WAL entries in binary format. Automatically rotated when size limit is reached (default: 64MB).
+Pintor uses a page-based storage format similar to PostgreSQL and MySQL for optimal performance and O(1) recovery:
+
+**WAL Log Files: `wal-{index}.log`**
+
+Each file is organized into fixed-size 4KB pages. Automatically rotated when size limit is reached (default: 64MB).
 Examples: `wal-0.log`, `wal-1.log`, `wal-2.log`.
 
-WAL entries are binary-packed as follows:
-1. Sequence - 8B
-2. Timestamp - 12B
-3. Data Length - 4B
-4. Data - variable
-5. CRC32 - 4B
+**Page Structure (4096 bytes):**
 
-**2. Sequence File: `sequence.dat`**
+Every page has the same header structure - no exceptions:
 
-Stores the current sequence number for crash recovery. Stores 8 bytes representing the last successfully written sequence number.
+- **Page Header (52 bytes)**:
+  - Magic Number (4B) - 0xDEADBEEF for validation
+  - First Sequence (8B) - Lowest sequence number in page
+  - Last Sequence (8B) - Highest sequence number in page  
+  - First Timestamp Seconds (8B) - Earliest entry timestamp seconds in page
+  - First Timestamp Nanos (4B) - Earliest entry timestamp nanoseconds in page
+  - Last Timestamp Seconds (8B) - Latest entry timestamp seconds in page
+  - Last Timestamp Nanos (4B) - Latest entry timestamp nanoseconds in page
+  - Entry Count (2B) - Number of entries in page
+  - Continuation Flags (2B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
+  - Header CRC (4B) - Validates header integrity
+- **Data Section (4044 bytes)** - WAL entries or continuation data
+- **Free Space** - Unused space at end of page
+
+**WAL Entry Format:**
+- Entry Type (1B) - DATA=1, CHECKPOINT=2
+- Sequence Number (8B)
+- Timestamp Seconds (8B)
+- Timestamp Nanoseconds (4B)
+- Data Length (4B)
+- Data (variable)
+- CRC32 (4B)
+
+**Page Flushing to Disk**
+
+Pages and WAL entries are buffered in memory and written to disk when any of the following conditions occur:
+
+1. Page becomes full - When the current page reaches 4KB capacity
+2. Manual sync - When sync() method is called explicitly for durability
+3. Reading from log - When any of the read*() methods are called to make sure all data is on disk
+4. WAL closure - When close() method is called to ensure all data is persisted
+
+**Record Spanning Examples:**
+
+*Multiple Small Entries (fit in one page):*
+```
+Page 1: [Header: flags=0, entryCount=3][Entry seq=101][Entry seq=102][Entry seq=103][Free space]
+```
+
+*Large Entry (spans 3 pages):*
+
+⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
+
+```
+Page 1: [Header: flags=FIRST_PART, seq=100-100][Entry header + 4KB data][No free space]
+Page 2: [Header: flags=MIDDLE_PART, seq=100-100][4KB continuation data][No free space]  
+Page 3: [Header: flags=LAST_PART, seq=100-100][2KB final data][Free space]
+```
+
+*Mixed Page (small entry + large entry start + small entry):*
+
+⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
+
+```
+Page 1: [Header: flags=FIRST_PART, seq=200-201][Entry seq=200 (1KB)][Entry seq=201 header + 3KB data][No free space]
+Page 2: [Header: flags=MIDDLE_PART, seq=201-201][4KB continuation data for seq=201][No free space]
+Page 3: [Header: flags=LAST_PART, seq=201-202][1KB final data for seq=201][Entry seq=202][Free space]
+```
+
+**Key Rules:**
+- Every page always has a 52-byte header
+- Continuation flags in header indicate spanning record parts
+- Spanning records share the same sequence number across all pages
+- First/Last sequence in header reflects actual entry sequences in that page
+- Middle pages contain only continuation data, no new entry headers
+
+**Recovery Process:**
+1. Seek to last page boundary in newest file: `fileSize - (fileSize % 4096)`
+2. Read 52-byte page header from the last page
+3. Extract sequence and timestamp metadata instantly from header
+4. Check continuation flags to understand page content type
+5. Total recovery time: O(1) regardless of file size
+
+## **Reading from sequence number range or timestamp range:**
+
+1. Scan all WAL files: Read the first and last page headers from each WAL file
+2. Filter overlapping files: Build a list of WAL files whose sequence/timestamp ranges overlap with the requested range
+3. Process overlapping files: For each overlapping WAL file, read all pages
+4. Skip non-overlapping pages: Within each file, skip pages whose ranges don't overlap with the requested range
+5. Filter and return entries: From overlapping pages, return only WAL entries that fall within the requested range
+
 
 ## API Summary
 
@@ -212,14 +230,40 @@ Stores the current sequence number for crash recovery. Stores 8 bytes representi
 // Custom configuration
 FileBasedWAL wal = new FileBasedWAL(
     walDirectory,
-    64 * 1024 * 1024,  // max file size (default: 64MB)
-    true               // sync on write (default: true)
+    64 * 1024 * 1024  // max file size (default: 64MB)
 );
 // Pass FileBasedWAL instance to WALManager
 WALManager walManager = new WALManager(wal);
 
 // Or use WALManager with default settings
 WALManager walManager = new WALManager(walDirectory);
+```
+
+## Flexible Data Handling
+
+Pintor's data entries are intentionally designed to use `ByteBuffer` (or `byte[]`) to maximize flexibility. This allows developers to send any data structure - such as JSON, serialized objects, or custom binary formats - without being constrained by a rigid schema. For example, you can include custom fields like transaction IDs, operation types, or metadata in the payload. These fields can later be used for custom filtering during reads or recovery, enabling application-specific logic like transaction tracking or selective replay.
+
+### Using byte[] and ByteBuffer APIs
+
+Use `byte[]` for simple payloads like JSON or serialized objects, ideal for quick prototyping. Use `ByteBuffer` for structured or high-performance data, enabling precise control over binary formats.
+
+#### Example: JSON with byte[]
+```java
+try (WALManager walManager = new WALManager(Paths.get("/path/to/wal"))) {
+    byte[] jsonData = "{\"txnId\":\"txn_4001\",\"operation\":\"INSERT\"}".getBytes();
+    WALEntry entry = walManager.createEntry(jsonData);
+}
+```
+
+#### Example: Structured Data with ByteBuffer
+```java
+try (WALManager walManager = new WALManager(Paths.get("/path/to/wal"))) {
+    ByteBuffer buffer = ByteBuffer.allocate(128)
+        .putInt(4001) // Transaction ID
+        .put("INSERT".getBytes());
+    buffer.flip();
+    WALEntry entry = walManager.createEntry(buffer);
+}
 ```
 
 ## Contributing

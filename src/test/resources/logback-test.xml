@@ -7,8 +7,8 @@
         </encoder>
     </appender>
 
-    <!-- WAL loggers - less verbose for tests -->
-    <logger name="com.github.lukaszbudnik.wal" level="INFO" additivity="false">
+    <!-- WAL loggers - more verbose for tests -->
+    <logger name="com.github.lukaszbudnik.wal" level="DEBUG" additivity="false">
         <appender-ref ref="CONSOLE"/>
     </logger>
 

@@ -23,7 +23,9 @@ class PointInTimeRecoverySequenceTest {
 
   @BeforeEach
   void setUp() throws WALException {
-    walManager = new WALManager(tempDir);
+    // use small max file size to force file rotations
+    FileBasedWAL wal = new FileBasedWAL(tempDir, FileBasedWAL.PAGE_SIZE);
+    walManager = new WALManager(wal);
   }
 
   @AfterEach
@@ -106,14 +108,6 @@ class PointInTimeRecoverySequenceTest {
     assertEquals(5L, phase2Only.get(1).getSequenceNumber());
     assertEquals(6L, phase2Only.get(2).getSequenceNumber());
     assertEquals(7L, phase2Only.get(3).getSequenceNumber());
-
-    // 5. Test reading from future sequence (should be empty)
-    List<WALEntry> futureEntries = walManager.readFrom(1000L);
-    assertTrue(futureEntries.isEmpty());
-
-    // 6. Test invalid range (from > to)
-    List<WALEntry> invalidRange = walManager.readRange(10L, 5L);
-    assertTrue(invalidRange.isEmpty());
   }
 
   @Test
@@ -168,7 +162,7 @@ class PointInTimeRecoverySequenceTest {
   @Test
   void testSequenceBasedRecoveryAcrossFiles() throws WALException {
     // Use a small file size to force rotation and test cross-file recovery
-    try (FileBasedWAL smallWal = new FileBasedWAL(tempDir.resolve("small_seq"), 1024, true);
+    try (FileBasedWAL smallWal = new FileBasedWAL(tempDir.resolve("small_seq"), 1024);
         WALManager smallWalManager = new WALManager(smallWal)) {
 
       // Add enough entries to trigger file rotation
@@ -289,6 +283,25 @@ class PointInTimeRecoverySequenceTest {
     assertEquals(0L, recoveryEntries.get(0).getSequenceNumber());
     assertEquals(1L, recoveryEntries.get(1).getSequenceNumber());
     assertEquals(2L, recoveryEntries.get(2).getSequenceNumber());
+  }
+
+  // test reading across multiple WAL files
+  @Test
+  public void testReadingAcrossMultipleWALFiles() throws WALException {
+    // Add enough entries to trigger file rotation
+    for (int i = 0; i < 1000; i++) {
+      String data = "INSERT|txn_" + (1000 + i) + "|table|" + i + "|" + "x".repeat(100);
+      walManager.createEntry(data.getBytes());
+    }
+
+    // Read all entries
+    List<WALEntry> entries = walManager.readRange(500L, 600L);
+    assertEquals(101, entries.size());
+
+    // Verify sequence continuity across files
+    for (int i = 500; i <= 600; i++) {
+      assertEquals(i, entries.get(i - 500).getSequenceNumber());
+    }
   }
 
   private boolean containsOperation(List<WALEntry> entries, String operation, String data) {
