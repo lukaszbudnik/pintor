@@ -123,25 +123,22 @@ Examples: `wal-0.log`, `wal-1.log`, `wal-2.log`.
 
 Every page has the same header structure - no exceptions:
 
-- **Page Header (52 bytes)**:
+- **Page Header (44 bytes)**:
   - Magic Number (4B) - 0xDEADBEEF for validation
   - First Sequence (8B) - Lowest sequence number in page
   - Last Sequence (8B) - Highest sequence number in page  
-  - First Timestamp Seconds (8B) - Earliest entry timestamp seconds in page
-  - First Timestamp Nanos (4B) - Earliest entry timestamp nanoseconds in page
-  - Last Timestamp Seconds (8B) - Latest entry timestamp seconds in page
-  - Last Timestamp Nanos (4B) - Latest entry timestamp nanoseconds in page
+  - First Timestamp (8B) - Earliest entry timestamp milliseconds in page
+  - Last Timestamp (8B) - Latest entry timestamp milliseconds in page
   - Entry Count (2B) - Number of entries in page
   - Continuation Flags (2B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
   - Header CRC (4B) - Validates header integrity
-- **Data Section (4044 bytes)** - WAL entries or continuation data
+- **Data Section (4052 bytes)** - WAL entries or continuation data
 - **Free Space** - Unused space at end of page
 
 **WAL Entry Format:**
 - Entry Type (1B) - DATA=1, CHECKPOINT=2
 - Sequence Number (8B)
-- Timestamp Seconds (8B)
-- Timestamp Nanoseconds (4B)
+- Timestamp Milliseconds (8B)
 - Data Length (4B)
 - Data (variable)
 - CRC32 (4B)
@@ -159,7 +156,7 @@ Pages and WAL entries are buffered in memory and written to disk when any of the
 
 *Multiple Small Entries (fit in one page):*
 ```
-Page 1: [Header: flags=0, entryCount=3][Entry seq=101][Entry seq=102][Entry seq=103][Free space]
+Page 1: [Header: flags=0, seq=101-103][Entry seq=101][Entry seq=102][Entry seq=103][Free space]
 ```
 
 *Large Entry (spans 3 pages):*
@@ -183,7 +180,7 @@ Page 3: [Header: flags=LAST_PART, seq=201-202][1KB final data for seq=201][Entry
 ```
 
 **Key Rules:**
-- Every page always has a 52-byte header
+- Every page always has a 44-byte header
 - Continuation flags in header indicate spanning record parts
 - Spanning records share the same sequence number across all pages
 - First/Last sequence in header reflects actual entry sequences in that page
@@ -191,7 +188,7 @@ Page 3: [Header: flags=LAST_PART, seq=201-202][1KB final data for seq=201][Entry
 
 **Recovery Process:**
 1. Seek to last page boundary in newest file: `fileSize - (fileSize % 4096)`
-2. Read 52-byte page header from the last page
+2. Read 44-byte page header from the last page
 3. Extract sequence and timestamp metadata instantly from header
 4. Check continuation flags to understand page content type
 5. Total recovery time: O(1) regardless of file size

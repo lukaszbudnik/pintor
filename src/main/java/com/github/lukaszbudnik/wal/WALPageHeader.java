@@ -6,10 +6,10 @@ import java.util.zip.CRC32;
 
 /**
  * Header for WAL pages in the page-based storage format. Each page is 4KB (4096 bytes) with a
- * 52-byte header.
+ * 44-byte header.
  */
 class WALPageHeader {
-  static final int HEADER_SIZE = 52; // 4+8+8+8+4+8+4+2+2+4 = 52 bytes
+  static final int HEADER_SIZE = 44; // 4+8+8+8+8+2+2+4 = 44 bytes
   static final int MAGIC_NUMBER = 0xDEADBEEF;
 
   // Continuation flags
@@ -21,10 +21,8 @@ class WALPageHeader {
   private final int magicNumber;
   private final long firstSequence;
   private final long lastSequence;
-  private final long firstTimestampSeconds;
-  private final int firstTimestampNanos;
-  private final long lastTimestampSeconds;
-  private final int lastTimestampNanos;
+  private final long firstTimestampMillis;
+  private final long lastTimestampMillis;
   private final short entryCount;
   private final short continuationFlags;
   private final int headerCRC;
@@ -39,10 +37,8 @@ class WALPageHeader {
     this.magicNumber = MAGIC_NUMBER;
     this.firstSequence = firstSequence;
     this.lastSequence = lastSequence;
-    this.firstTimestampSeconds = firstTimestamp.getEpochSecond();
-    this.firstTimestampNanos = firstTimestamp.getNano();
-    this.lastTimestampSeconds = lastTimestamp.getEpochSecond();
-    this.lastTimestampNanos = lastTimestamp.getNano();
+    this.firstTimestampMillis = firstTimestamp.toEpochMilli();
+    this.lastTimestampMillis = lastTimestamp.toEpochMilli();
     this.entryCount = entryCount;
     this.continuationFlags = continuationFlags;
     this.headerCRC = calculateHeaderCRC();
@@ -52,34 +48,28 @@ class WALPageHeader {
       int magicNumber,
       long firstSequence,
       long lastSequence,
-      long firstTimestampSeconds,
-      int firstTimestampNanos,
-      long lastTimestampSeconds,
-      int lastTimestampNanos,
+      long firstTimestampMillis,
+      long lastTimestampMillis,
       short entryCount,
       short continuationFlags,
       int headerCRC) {
     this.magicNumber = magicNumber;
     this.firstSequence = firstSequence;
     this.lastSequence = lastSequence;
-    this.firstTimestampSeconds = firstTimestampSeconds;
-    this.firstTimestampNanos = firstTimestampNanos;
-    this.lastTimestampSeconds = lastTimestampSeconds;
-    this.lastTimestampNanos = lastTimestampNanos;
+    this.firstTimestampMillis = firstTimestampMillis;
+    this.lastTimestampMillis = lastTimestampMillis;
     this.entryCount = entryCount;
     this.continuationFlags = continuationFlags;
     this.headerCRC = headerCRC;
   }
 
   private int calculateHeaderCRC() {
-    ByteBuffer buffer = ByteBuffer.allocate(48); // Header size (52) minus CRC (4) = 48
+    ByteBuffer buffer = ByteBuffer.allocate(40); // Header size (44) minus CRC (4) = 40
     buffer.putInt(magicNumber);
     buffer.putLong(firstSequence);
     buffer.putLong(lastSequence);
-    buffer.putLong(firstTimestampSeconds);
-    buffer.putInt(firstTimestampNanos);
-    buffer.putLong(lastTimestampSeconds);
-    buffer.putInt(lastTimestampNanos);
+    buffer.putLong(firstTimestampMillis);
+    buffer.putLong(lastTimestampMillis);
     buffer.putShort(entryCount);
     buffer.putShort(continuationFlags);
 
@@ -93,10 +83,8 @@ class WALPageHeader {
     buffer.putInt(magicNumber);
     buffer.putLong(firstSequence);
     buffer.putLong(lastSequence);
-    buffer.putLong(firstTimestampSeconds);
-    buffer.putInt(firstTimestampNanos);
-    buffer.putLong(lastTimestampSeconds);
-    buffer.putInt(lastTimestampNanos);
+    buffer.putLong(firstTimestampMillis);
+    buffer.putLong(lastTimestampMillis);
     buffer.putShort(entryCount);
     buffer.putShort(continuationFlags);
     buffer.putInt(headerCRC);
@@ -112,10 +100,8 @@ class WALPageHeader {
     int magicNumber = buffer.getInt();
     long firstSequence = buffer.getLong();
     long lastSequence = buffer.getLong();
-    long firstTimestampSeconds = buffer.getLong();
-    int firstTimestampNanos = buffer.getInt();
-    long lastTimestampSeconds = buffer.getLong();
-    int lastTimestampNanos = buffer.getInt();
+    long firstTimestampMillis = buffer.getLong();
+    long lastTimestampMillis = buffer.getLong();
     short entryCount = buffer.getShort();
     short continuationFlags = buffer.getShort();
     int headerCRC = buffer.getInt();
@@ -125,10 +111,8 @@ class WALPageHeader {
             magicNumber,
             firstSequence,
             lastSequence,
-            firstTimestampSeconds,
-            firstTimestampNanos,
-            lastTimestampSeconds,
-            lastTimestampNanos,
+            firstTimestampMillis,
+            lastTimestampMillis,
             entryCount,
             continuationFlags,
             headerCRC);
@@ -154,11 +138,11 @@ class WALPageHeader {
   }
 
   Instant getFirstTimestamp() {
-    return Instant.ofEpochSecond(firstTimestampSeconds, firstTimestampNanos);
+    return Instant.ofEpochMilli(firstTimestampMillis);
   }
 
   Instant getLastTimestamp() {
-    return Instant.ofEpochSecond(lastTimestampSeconds, lastTimestampNanos);
+    return Instant.ofEpochMilli(lastTimestampMillis);
   }
 
   short getEntryCount() {
