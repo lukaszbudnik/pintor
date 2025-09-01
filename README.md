@@ -109,32 +109,72 @@ try (FileBasedWAL wal = new FileBasedWAL(walDir)) {
 
 ### Storage Format
 
-**Page-Based WAL Format**
-
-Pintor uses a page-based storage format similar to PostgreSQL and MySQL for optimal performance and O(1) recovery:
-
 **WAL Log Files: `wal-{index}.log`**
 
-Each file is organized into fixed-size 4KB pages. Automatically rotated when size limit is reached (default: 64MB).
-Examples: `wal-0.log`, `wal-1.log`, `wal-2.log`.
+A WAL file, such as `wal-0.log`, is a collection of fixed-size 4KB pages. The file grows as new data is written, and a new file is created (rotated) when the size limit is reached (default: 64MB).
+
+```
++----------------------+
+|      wal-0.log       |
++----------------------+
+|   WAL Page 1 (4KB)   |
++----------------------+
+|   WAL Page 2 (4KB)   |
++----------------------+
+|         ...          |
++----------------------+
+|   WAL Page N (4KB)   |
++----------------------+
+```
 
 **Page Structure (4096 bytes):**
 
-Every page has the same header structure - no exceptions:
+Each 4KB page consists of a fixed-size header and a data section that contains the WAL entries.
 
-- **Page Header (44 bytes)**:
-  - Magic Number (4B) - 0xDEADBEEF for validation
+```
++------------------------------------------------+
+|          WAL Page (4096 bytes)                 |
++------------------------------------------------+
+|  +------------------------------------------+  |
+|  |           Page Header (44 bytes)         |  |
+|  +------------------------------------------+  |
+|  |  Magic Number (4B)                       |  |
+|  |  First Sequence (8B)                     |  |
+|  |  Last Sequence (8B)                      |  |
+|  |  First Timestamp (8B)                    |  |
+|  |  Last Timestamp (8B)                     |  |
+|  |  Entry Count (2B)                        |  |
+|  |  Continuation Flags (2B)                 |  |
+|  |  Header CRC (4B)                         |  |
+|  +------------------------------------------+  |
+|  |           Data Section (4052 bytes)      |  |
+|  +------------------------------------------+  |
+|  |  WAL Entry 1 (Variable Length)           |  |
+|  |  WAL Entry 2 (Variable Length)           |  |
+|  |  ...                                     |  |
+|  |  Free Space                              |  |
+|  +------------------------------------------+  |
++------------------------------------------------+
+```
+
+- **Page Header Fields (44 bytes)**:
+  - Magic Number (4B) - `0xDEADBEEF` for validation
   - First Sequence (8B) - Lowest sequence number in page
-  - Last Sequence (8B) - Highest sequence number in page  
+  - Last Sequence (8B) - Highest sequence number in page
   - First Timestamp (8B) - Earliest entry timestamp milliseconds in page
   - Last Timestamp (8B) - Latest entry timestamp milliseconds in page
   - Entry Count (2B) - Number of entries in page
   - Continuation Flags (2B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
   - Header CRC (4B) - Validates header integrity
-- **Data Section (4052 bytes)** - WAL entries or continuation data
-- **Free Space** - Unused space at end of page
+- **Data Section (4052 bytes)** - Contains WAL entries or continuation data for entries spanning multiple pages (for more see: [Record Spanning Examples](#record-spanning-examples))
+- **Free Space** - Unused bytes at page end, occurs when:
+  - Page is flushed before completely full by either manual sync or read operations (for more see: [Page Flushing to Disk](#page-flushing-to-disk))
+  - Next entry is too large to fit in remaining space
 
-**WAL Entry Format:**
+**WAL Entry Format**
+
+Entries are stored sequentially in the data section of a page. An entry is composed of a fixed-size header and a variable-length data payload.
+
 - Entry Type (1B) - DATA=1, CHECKPOINT=2
 - Sequence Number (8B)
 - Timestamp Milliseconds (8B)
@@ -142,7 +182,21 @@ Every page has the same header structure - no exceptions:
 - Data (variable)
 - CRC32 (4B)
 
-**Page Flushing to Disk**
+```
++------------------------------------------------+
+|           WAL Entry (Variable Length)          |
++------------------------------------------------+
+|  Entry Type (1B)     |  Sequence Number (8B)   |
++------------------------------------------------+
+|  Timestamp (8B)      |  Data Length (4B)       |
++------------------------------------------------+
+|             Data (Variable Length)             |
++------------------------------------------------+
+|                   CRC32 (4B)                   |
++------------------------------------------------+
+```
+
+### Page Flushing to Disk
 
 Pages and WAL entries are buffered in memory and written to disk when any of the following conditions occur:
 
@@ -151,14 +205,15 @@ Pages and WAL entries are buffered in memory and written to disk when any of the
 3. Reading from log - When any of the read*() methods are called to make sure all data is on disk
 4. WAL closure - When close() method is called to ensure all data is persisted
 
-**Record Spanning Examples:**
+### Record Spanning Examples
 
-*Multiple Small Entries (fit in one page):*
+Multiple Small Entries (fit in one page):
+
 ```
 Page 1: [Header: flags=0, seq=101-103][Entry seq=101][Entry seq=102][Entry seq=103][Free space]
 ```
 
-*Large Entry (spans 3 pages):*
+Large Entry (spans 3 pages):
 
 ⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
 
@@ -168,7 +223,7 @@ Page 2: [Header: flags=MIDDLE_PART, seq=100-100][4KB continuation data][No free 
 Page 3: [Header: flags=LAST_PART, seq=100-100][2KB final data][Free space]
 ```
 
-*Mixed Page (small entry + large entry start + small entry):*
+Mixed Page (small entry + large entry start + small entry):
 
 ⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
 
