@@ -18,17 +18,17 @@ class ThreadSafetyIntegrationTest {
 
   @TempDir Path tempDir;
 
-  private WALManager walManager;
+  private FileBasedWAL wal;
 
   @BeforeEach
   void setUp() throws WALException {
-    walManager = new WALManager(tempDir);
+    wal = new FileBasedWAL(tempDir);
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    if (walManager != null) {
-      walManager.close();
+    if (wal != null) {
+      wal.close();
     }
   }
 
@@ -52,7 +52,7 @@ class ThreadSafetyIntegrationTest {
                 for (int j = 0; j < entriesPerThread; j++) {
                   String data = "thread_" + threadId + "_entry_" + j;
                   try {
-                    WALEntry entry = walManager.createEntry(data.getBytes());
+                    WALEntry entry = wal.createAndAppend(ByteBuffer.wrap(data.getBytes()));
                     threadEntries.add(entry);
                   } catch (WALException e) {
                     throw new RuntimeException("Failed to create entry", e);
@@ -92,7 +92,7 @@ class ThreadSafetyIntegrationTest {
     }
 
     // Verify all entries are persisted correctly
-    List<WALEntry> persistedEntries = walManager.readFrom(0L);
+    List<WALEntry> persistedEntries = wal.readFrom(0L);
     assertEquals(numThreads * entriesPerThread, persistedEntries.size());
 
     // Verify sequence numbers in persisted entries are also consecutive
@@ -123,7 +123,7 @@ class ThreadSafetyIntegrationTest {
                 }
 
                 try {
-                  return walManager.createEntryBatch(batchData);
+                  return wal.createAndAppendBatch(batchData);
                 } catch (WALException e) {
                   throw new RuntimeException("Failed to create batch", e);
                 }
@@ -157,10 +157,10 @@ class ThreadSafetyIntegrationTest {
       assertEquals(i, sequenceNumbers.get(i));
     }
 
-    walManager.sync();
+    wal.sync();
 
     // Verify persistence
-    List<WALEntry> persistedEntries = walManager.readFrom(0L);
+    List<WALEntry> persistedEntries = wal.readFrom(0L);
     assertEquals(numThreads * batchSize, persistedEntries.size());
   }
 
@@ -178,7 +178,7 @@ class ThreadSafetyIntegrationTest {
             () -> {
               for (int i = 0; i < 50; i++) {
                 try {
-                  walManager.createEntry(("single_" + i).getBytes());
+                  wal.createAndAppend(ByteBuffer.wrap(("single_" + i).getBytes()));
                 } catch (WALException e) {
                   throw new RuntimeException(e);
                 }
@@ -195,7 +195,7 @@ class ThreadSafetyIntegrationTest {
                 for (int i = 0; i < 30; i++) {
                   batch.add(ByteBuffer.wrap(("batch_" + i).getBytes()));
                 }
-                walManager.createEntryBatch(batch);
+                wal.createAndAppendBatch(batch);
                 return 30;
               } catch (WALException e) {
                 throw new RuntimeException(e);
@@ -208,7 +208,7 @@ class ThreadSafetyIntegrationTest {
             () -> {
               for (int i = 0; i < 20; i++) {
                 try {
-                  walManager.createEntry(("single2_" + i).getBytes());
+                  wal.createAndAppend(ByteBuffer.wrap(("single2_" + i).getBytes()));
                 } catch (WALException e) {
                   throw new RuntimeException(e);
                 }
@@ -225,10 +225,10 @@ class ThreadSafetyIntegrationTest {
     executor.shutdown();
     assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
 
-    walManager.sync();
+    wal.sync();
 
     // Verify total count and sequence integrity
-    List<WALEntry> allEntries = walManager.readFrom(0L);
+    List<WALEntry> allEntries = wal.readFrom(0L);
     assertEquals(totalExpected, allEntries.size());
 
     // Verify consecutive sequence numbers

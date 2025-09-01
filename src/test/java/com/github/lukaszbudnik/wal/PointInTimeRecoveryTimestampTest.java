@@ -20,17 +20,17 @@ class PointInTimeRecoveryTimestampTest {
 
   @TempDir Path tempDir;
 
-  private WALManager walManager;
+  private FileBasedWAL wal;
 
   @BeforeEach
   void setUp() throws WALException {
-    walManager = new WALManager(tempDir);
+    wal = new FileBasedWAL(tempDir);
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    if (walManager != null) {
-      walManager.close();
+    if (wal != null) {
+      wal.close();
     }
   }
 
@@ -42,12 +42,15 @@ class PointInTimeRecoveryTimestampTest {
     Instant phase1Start = Instant.now();
     Thread.sleep(10);
 
-    walManager.createEntry("BEGIN|txn_1001|".getBytes());
-    walManager.createEntry(
-        "INSERT|txn_1001|users|1|{\"name\":\"Alice\",\"email\":\"alice@example.com\"}".getBytes());
-    walManager.createEntry(
-        "INSERT|txn_1001|users|2|{\"name\":\"Bob\",\"email\":\"bob@example.com\"}".getBytes());
-    walManager.createEntry("COMMIT|txn_1001|".getBytes());
+    wal.createAndAppend(ByteBuffer.wrap("BEGIN|txn_1001|".getBytes()));
+    wal.createAndAppend(
+        ByteBuffer.wrap(
+            "INSERT|txn_1001|users|1|{\"name\":\"Alice\",\"email\":\"alice@example.com\"}"
+                .getBytes()));
+    wal.createAndAppend(
+        ByteBuffer.wrap(
+            "INSERT|txn_1001|users|2|{\"name\":\"Bob\",\"email\":\"bob@example.com\"}".getBytes()));
+    wal.createAndAppend(ByteBuffer.wrap("COMMIT|txn_1001|".getBytes()));
 
     Thread.sleep(10);
     Instant phase1End = Instant.now();
@@ -57,12 +60,13 @@ class PointInTimeRecoveryTimestampTest {
     Instant phase2Start = Instant.now();
     Thread.sleep(10);
 
-    walManager.createEntry("BEGIN|txn_1002|".getBytes());
-    walManager.createEntry(
-        "UPDATE|txn_1002|users|1|{\"name\":\"Alice Smith\",\"email\":\"alice.smith@example.com\"}"
-            .getBytes());
-    walManager.createEntry("DELETE|txn_1002|users|2|".getBytes());
-    walManager.createEntry("COMMIT|txn_1002|".getBytes());
+    wal.createAndAppend(ByteBuffer.wrap("BEGIN|txn_1002|".getBytes()));
+    wal.createAndAppend(
+        ByteBuffer.wrap(
+            "UPDATE|txn_1002|users|1|{\"name\":\"Alice Smith\",\"email\":\"alice.smith@example.com\"}"
+                .getBytes()));
+    wal.createAndAppend(ByteBuffer.wrap("DELETE|txn_1002|users|2|".getBytes()));
+    wal.createAndAppend(ByteBuffer.wrap("COMMIT|txn_1002|".getBytes()));
 
     Thread.sleep(10);
     Instant phase2End = Instant.now();
@@ -72,11 +76,12 @@ class PointInTimeRecoveryTimestampTest {
     Instant phase3Start = Instant.now();
     Thread.sleep(10);
 
-    walManager.createEntry("BEGIN|txn_1003|".getBytes());
-    walManager.createEntry(
-        "INSERT|txn_1003|users|3|{\"name\":\"Charlie\",\"email\":\"charlie@example.com\"}"
-            .getBytes());
-    walManager.createEntry("COMMIT|txn_1003|".getBytes());
+    wal.createAndAppend(ByteBuffer.wrap("BEGIN|txn_1003|".getBytes()));
+    wal.createAndAppend(
+        ByteBuffer.wrap(
+            "INSERT|txn_1003|users|3|{\"name\":\"Charlie\",\"email\":\"charlie@example.com\"}"
+                .getBytes()));
+    wal.createAndAppend(ByteBuffer.wrap("COMMIT|txn_1003|".getBytes()));
 
     Thread.sleep(10);
     Instant phase3End = Instant.now();
@@ -84,32 +89,32 @@ class PointInTimeRecoveryTimestampTest {
     // Test point-in-time recovery scenarios
 
     // 1. Recover to end of Phase 1 (should have Alice and Bob)
-    List<WALEntry> phase1Entries = walManager.readRange(phase1Start, phase1End);
+    List<WALEntry> phase1Entries = wal.readRange(phase1Start, phase1End);
     assertEquals(4, phase1Entries.size());
     assertTrue(containsOperation(phase1Entries, "INSERT", "Alice"));
     assertTrue(containsOperation(phase1Entries, "INSERT", "Bob"));
     assertFalse(containsOperation(phase1Entries, "UPDATE", "Alice Smith"));
 
     // 2. Recover to end of Phase 2 (should have Alice updated, Bob deleted)
-    List<WALEntry> phase1And2Entries = walManager.readRange(phase1Start, phase2End);
+    List<WALEntry> phase1And2Entries = wal.readRange(phase1Start, phase2End);
     assertEquals(8, phase1And2Entries.size());
     assertTrue(containsOperation(phase1And2Entries, "UPDATE", "Alice Smith"));
     assertTrue(containsOperation(phase1And2Entries, "DELETE", "users|2"));
 
     // 3. Recover everything (should include Charlie)
-    List<WALEntry> allEntries = walManager.readFrom(phase1Start);
+    List<WALEntry> allEntries = wal.readFrom(phase1Start);
     assertEquals(11, allEntries.size());
     assertTrue(containsOperation(allEntries, "INSERT", "Charlie"));
 
     // 4. Recover only Phase 2 operations
-    List<WALEntry> phase2Only = walManager.readRange(phase2Start, phase2End);
+    List<WALEntry> phase2Only = wal.readRange(phase2Start, phase2End);
     assertEquals(4, phase2Only.size());
     assertTrue(containsOperation(phase2Only, "UPDATE", "Alice Smith"));
     assertTrue(containsOperation(phase2Only, "DELETE", "users|2"));
     assertFalse(containsOperation(phase2Only, "INSERT", "Charlie"));
 
     // 5. Test reading from future timestamp (should be empty)
-    List<WALEntry> futureEntries = walManager.readFrom(Instant.now().plusSeconds(60));
+    List<WALEntry> futureEntries = wal.readFrom(Instant.now().plusSeconds(60));
     assertTrue(futureEntries.isEmpty());
   }
 
@@ -132,7 +137,7 @@ class PointInTimeRecoveryTimestampTest {
                 "INSERT|txn_batch|products|3|{\"name\":\"Keyboard\",\"price\":79.99}".getBytes()),
             ByteBuffer.wrap("COMMIT|txn_batch|".getBytes()));
 
-    List<WALEntry> batchEntries = walManager.createEntryBatch(batchData);
+    List<WALEntry> batchEntries = wal.createAndAppendBatch(batchData);
 
     Thread.sleep(10);
     Instant afterBatch = Instant.now();
@@ -143,7 +148,7 @@ class PointInTimeRecoveryTimestampTest {
     }
 
     // Read the batch by timestamp
-    List<WALEntry> batchByTime = walManager.readRange(beforeBatch, afterBatch);
+    List<WALEntry> batchByTime = wal.readRange(beforeBatch, afterBatch);
     assertEquals(5, batchByTime.size());
 
     // Verify all batch entries are included and in correct order
@@ -168,9 +173,9 @@ class PointInTimeRecoveryTimestampTest {
     Thread.sleep(10);
 
     // Create entries rapidly
-    WALEntry entry1 = walManager.createEntry("rapid1".getBytes());
-    WALEntry entry2 = walManager.createEntry("rapid2".getBytes());
-    WALEntry entry3 = walManager.createEntry("rapid3".getBytes());
+    WALEntry entry1 = wal.createAndAppend(ByteBuffer.wrap("rapid1".getBytes()));
+    WALEntry entry2 = wal.createAndAppend(ByteBuffer.wrap("rapid2".getBytes()));
+    WALEntry entry3 = wal.createAndAppend(ByteBuffer.wrap("rapid3".getBytes()));
 
     // Wait a bit to ensure timestamps are different
     Thread.sleep(10);
@@ -178,7 +183,7 @@ class PointInTimeRecoveryTimestampTest {
     Instant end = Instant.now();
 
     // Read by timestamp range
-    List<WALEntry> rapidEntries = walManager.readRange(start, end);
+    List<WALEntry> rapidEntries = wal.readRange(start, end);
     assertEquals(3, rapidEntries.size());
 
     // Verify sequence order is maintained even with very close timestamps
@@ -202,25 +207,25 @@ class PointInTimeRecoveryTimestampTest {
   void testReadingAcrossMultipleWALFiles() throws WALException, InterruptedException {
     // Create enough entries to span multiple WAL files
     for (int i = 0; i < 250; i++) {
-      walManager.createEntry(("entry" + i).getBytes());
+      wal.createAndAppend(ByteBuffer.wrap(("entry" + i).getBytes()));
     }
     // Get time
     Instant before = Instant.now();
     Thread.sleep(10);
     // create 500 entries
     for (int i = 250; i < 750; i++) {
-      walManager.createEntry(("entry" + i).getBytes());
+      wal.createAndAppend(ByteBuffer.wrap(("entry" + i).getBytes()));
     }
     // Get time
     Instant after = Instant.now();
     Thread.sleep(10);
     // create remaining 250 entries
     for (int i = 750; i < 1000; i++) {
-      walManager.createEntry(("entry" + i).getBytes());
+      wal.createAndAppend(ByteBuffer.wrap(("entry" + i).getBytes()));
     }
 
     // Read entries between before and after
-    List<WALEntry> entries = walManager.readRange(before, after);
+    List<WALEntry> entries = wal.readRange(before, after);
     assertEquals(500, entries.size());
   }
 
