@@ -3,6 +3,7 @@ package com.github.lukaszbudnik.wal;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,7 +31,7 @@ class WALPerformanceTest {
   private static final int ENTRY_SIZE_BYTES = 1024; // 1KB per entry - configurable
   private static final byte[] FIXED_ENTRY_DATA = createFixedEntryData(ENTRY_SIZE_BYTES);
   @TempDir Path tempDir;
-  private WALManager walManager;
+  private FileBasedWAL wal;
   private Runtime runtime;
 
   /** Creates fixed entry data to avoid CPU cycles during test execution. */
@@ -60,13 +61,13 @@ class WALPerformanceTest {
     runtime = Runtime.getRuntime();
     // Force garbage collection before test to get clean memory baseline
     System.gc();
-    walManager = new WALManager(tempDir);
+    wal = new FileBasedWAL(tempDir);
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    if (walManager != null) {
-      walManager.close();
+    if (wal != null) {
+      wal.close();
     }
   }
 
@@ -88,7 +89,7 @@ class WALPerformanceTest {
     long startTime = System.nanoTime();
 
     for (int i = 0; i < TOTAL_ENTRIES; i++) {
-      walManager.createEntry(FIXED_ENTRY_DATA);
+      wal.createAndAppend(ByteBuffer.wrap(FIXED_ENTRY_DATA));
 
       // Progress indicator every 10k entries
       if ((i + 1) % 10_000 == 0) {
@@ -99,7 +100,7 @@ class WALPerformanceTest {
     }
 
     // Force sync to ensure all data is written
-    walManager.sync();
+    wal.sync();
 
     long endTime = System.nanoTime();
     long executionTimeNs = endTime - startTime;
@@ -109,8 +110,8 @@ class WALPerformanceTest {
     long maxMemoryAfter = runtime.maxMemory();
 
     // Verify correctness
-    assertEquals(TOTAL_ENTRIES, walManager.size());
-    assertEquals(TOTAL_ENTRIES - 1, walManager.getCurrentSequenceNumber());
+    assertEquals(TOTAL_ENTRIES, wal.size());
+    assertEquals(TOTAL_ENTRIES - 1, wal.getCurrentSequenceNumber());
 
     // Calculate and display metrics
     displayPerformanceMetrics(
@@ -145,9 +146,9 @@ class WALPerformanceTest {
     System.out.println("  Entry size: " + ENTRY_SIZE_BYTES + " bytes");
 
     // Prepare batch data (reuse same data to avoid CPU overhead)
-    List<byte[]> batchData = new ArrayList<>(batchSize);
+    List<ByteBuffer> batchData = new ArrayList<>(batchSize);
     for (int i = 0; i < batchSize; i++) {
-      batchData.add(FIXED_ENTRY_DATA);
+      batchData.add(ByteBuffer.wrap(FIXED_ENTRY_DATA));
     }
 
     // Memory baseline
@@ -158,7 +159,7 @@ class WALPerformanceTest {
     long startTime = System.nanoTime();
 
     for (int batch = 0; batch < numBatches; batch++) {
-      walManager.createEntryBatchFromBytes(batchData);
+      wal.createAndAppendBatch(batchData);
 
       // Progress indicator
       if ((batch + 1) % 10 == 0) {
@@ -170,7 +171,7 @@ class WALPerformanceTest {
     }
 
     // Force sync
-    walManager.sync();
+    wal.sync();
 
     long endTime = System.nanoTime();
     long executionTimeNs = endTime - startTime;
@@ -180,7 +181,7 @@ class WALPerformanceTest {
     long maxMemoryAfter = runtime.maxMemory();
 
     // Verify correctness
-    assertEquals(TOTAL_ENTRIES, walManager.size());
+    assertEquals(TOTAL_ENTRIES, wal.size());
 
     // Calculate and display metrics
     displayPerformanceMetrics(
@@ -204,12 +205,12 @@ class WALPerformanceTest {
     // First, write test data
     System.out.println("Setting up test data...");
     for (int i = 0; i < TOTAL_ENTRIES; i++) {
-      walManager.createEntry(FIXED_ENTRY_DATA);
+      wal.createAndAppend(ByteBuffer.wrap(FIXED_ENTRY_DATA));
       if ((i + 1) % 20_000 == 0) {
         System.out.printf("  Setup progress: %d/%d entries\n", i + 1, TOTAL_ENTRIES);
       }
     }
-    walManager.sync();
+    wal.sync();
 
     System.out.println("Starting read performance test...");
 
@@ -219,7 +220,7 @@ class WALPerformanceTest {
     // Test reading all entries
     long startTime = System.nanoTime();
 
-    List<WALEntry> allEntries = walManager.readFrom(0L);
+    List<WALEntry> allEntries = wal.readFrom(0L);
 
     long endTime = System.nanoTime();
     long executionTimeNs = endTime - startTime;
@@ -335,7 +336,7 @@ class WALPerformanceTest {
     long creationStartTime = System.nanoTime();
 
     for (int i = 0; i < TOTAL_ENTRIES; i++) {
-      walManager.createEntry(FIXED_ENTRY_DATA);
+      wal.createAndAppend(ByteBuffer.wrap(FIXED_ENTRY_DATA));
 
       // Progress indicator every 20k entries
       if ((i + 1) % 20_000 == 0) {
@@ -345,7 +346,7 @@ class WALPerformanceTest {
       }
     }
 
-    walManager.sync();
+    wal.sync();
     long creationEndTime = System.nanoTime();
     long creationTimeNs = creationEndTime - creationStartTime;
 
@@ -357,7 +358,7 @@ class WALPerformanceTest {
     System.out.println("\nPhase 2: Closing WAL...");
     long closeStartTime = System.nanoTime();
 
-    walManager.close();
+    wal.close();
 
     long closeEndTime = System.nanoTime();
     long closeTimeNs = closeEndTime - closeStartTime;
@@ -366,7 +367,7 @@ class WALPerformanceTest {
     System.out.println("\nPhase 3: Reopening WAL with optimized range building...");
     long reopenStartTime = System.nanoTime();
 
-    walManager = new WALManager(tempDir);
+    wal = new FileBasedWAL(tempDir);
 
     long reopenEndTime = System.nanoTime();
     long reopenTimeNs = reopenEndTime - reopenStartTime;
@@ -379,22 +380,21 @@ class WALPerformanceTest {
     System.out.println("\nPhase 4: Verifying correctness after restart...");
     long verifyStartTime = System.nanoTime();
 
-    assertEquals(TOTAL_ENTRIES, walManager.size());
-    assertEquals(TOTAL_ENTRIES - 1, walManager.getCurrentSequenceNumber());
+    assertEquals(TOTAL_ENTRIES, wal.size());
+    assertEquals(TOTAL_ENTRIES - 1, wal.getCurrentSequenceNumber());
 
     // Test optimized range queries work correctly
-    List<WALEntry> middleRange = walManager.readRange(TOTAL_ENTRIES / 2 - 5, TOTAL_ENTRIES / 2 + 5);
+    List<WALEntry> middleRange = wal.readRange(TOTAL_ENTRIES / 2 - 5, TOTAL_ENTRIES / 2 + 5);
     assertEquals(11, middleRange.size());
 
     // Test timestamp-based queries work correctly
-    List<WALEntry> allEntries = walManager.readFrom(0L);
+    List<WALEntry> allEntries = wal.readFrom(0L);
     assertEquals(TOTAL_ENTRIES, allEntries.size());
 
     Instant firstTimestamp = allEntries.get(0).getTimestamp();
     Instant lastTimestamp = allEntries.get(allEntries.size() - 1).getTimestamp();
 
-    List<WALEntry> timestampRange =
-        walManager.readRange(firstTimestamp, firstTimestamp.plusSeconds(1));
+    List<WALEntry> timestampRange = wal.readRange(firstTimestamp, firstTimestamp.plusSeconds(1));
     assertTrue(timestampRange.size() > 0, "Should find entries in timestamp range");
 
     long verifyEndTime = System.nanoTime();
