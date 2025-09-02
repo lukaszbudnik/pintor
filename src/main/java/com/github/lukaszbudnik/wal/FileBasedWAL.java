@@ -459,19 +459,6 @@ public class FileBasedWAL implements WriteAheadLog {
 
   @Override
   public List<WALEntry> readFrom(long fromSequenceNumber) throws WALException {
-    lock.writeLock().lock();
-    try {
-      // Flush current page to ensure all data is on disk
-      if (currentPageBuffer != null && currentPageBuffer.position() > WALPageHeader.HEADER_SIZE) {
-        flushCurrentPage();
-        initializeNewPage();
-      }
-    } catch (IOException e) {
-      throw new WALException("Failed to flush page before read", e);
-    } finally {
-      lock.writeLock().unlock();
-    }
-
     return readRange(fromSequenceNumber, Long.MAX_VALUE);
   }
 
@@ -574,7 +561,6 @@ public class FileBasedWAL implements WriteAheadLog {
       long fileSize = file.length();
       long currentPos = 0;
       int pagesRead = 0;
-      int pagesSkipped = 0;
 
       logger.debug("File size: {} bytes, expected pages: {}", fileSize, fileSize / PAGE_SIZE);
 
@@ -600,7 +586,6 @@ public class FileBasedWAL implements WriteAheadLog {
           if (header.getLastSequence() < fromSeq || header.getFirstSequence() > toSeq) {
             logger.debug("Skipping non-overlapping page at offset {}", currentPos);
             currentPos += PAGE_SIZE;
-            pagesSkipped++;
             continue;
           }
 
@@ -617,19 +602,16 @@ public class FileBasedWAL implements WriteAheadLog {
           logger.debug("Read {} entries from page at offset {}", pageEntries.size(), currentPos);
 
         } catch (WALException e) {
-          // Skip corrupted page
-          logger.warn("Skipping corrupted page at offset {}: {}", currentPos, e.getMessage());
-          pagesSkipped++;
+          // Re-throw corruption errors instead of skipping
+          throw new WALException(
+              "Corrupted page at offset " + currentPos + ": " + e.getMessage(), e);
         }
 
         currentPos += PAGE_SIZE;
       }
 
       logger.debug(
-          "File processing completed: {} entries from {} pages (skipped: {})",
-          entries.size(),
-          pagesRead,
-          pagesSkipped);
+          "File processing completed: {} entries from {} pages", entries.size(), pagesRead);
     }
 
     return entries;
@@ -647,28 +629,31 @@ public class FileBasedWAL implements WriteAheadLog {
     while (currentPos < endPos && currentPos < file.length()) {
       if (endPos - currentPos < ENTRY_HEADER_SIZE) break;
 
-      // Read entry header
+      // Read entry header to get size
+      long entryStart = file.getFilePointer();
       byte entryType = file.readByte();
       if (entryType == 0) break; // Padding
 
-      long sequence = file.readLong();
-      long timestampMillis = file.readLong();
+      file.readLong(); // sequence
+      file.readLong(); // timestamp
       int dataLength = file.readInt();
 
       if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
         break; // Invalid entry
       }
 
-      // Read data and CRC
-      byte[] data = new byte[dataLength];
-      file.readFully(data);
-      int crc = file.readInt();
+      // Read complete entry data
+      int totalEntrySize = ENTRY_HEADER_SIZE + dataLength;
+      byte[] entryData = new byte[totalEntrySize];
+      file.seek(entryStart);
+      file.readFully(entryData);
+
+      // Deserialize with CRC32 validation
+      WALEntry entry = WALEntry.deserialize(entryData);
 
       // Filter by sequence range
-      if (sequence >= fromSeq && sequence <= toSeq) {
-        Instant timestamp = Instant.ofEpochMilli(timestampMillis);
-        ByteBuffer dataBuffer = dataLength > 0 ? ByteBuffer.wrap(data) : null;
-        entries.add(new WALEntry(sequence, timestamp, dataBuffer));
+      if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
+        entries.add(entry);
       }
 
       currentPos = file.getFilePointer();
@@ -809,8 +794,9 @@ public class FileBasedWAL implements WriteAheadLog {
                   file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromTs, toTs));
 
         } catch (WALException e) {
-          // Skip corrupted page
-          logger.warn("Skipping corrupted page at offset {}: {}", currentPos, e.getMessage());
+          // Re-throw corruption errors instead of skipping
+          throw new WALException(
+              "Corrupted page at offset " + currentPos + ": " + e.getMessage(), e);
         }
 
         currentPos += PAGE_SIZE;
@@ -832,28 +818,31 @@ public class FileBasedWAL implements WriteAheadLog {
     while (currentPos < endPos && currentPos < file.length()) {
       if (endPos - currentPos < ENTRY_HEADER_SIZE) break;
 
-      // Read entry header
+      // Read entry header to get size
+      long entryStart = file.getFilePointer();
       byte entryType = file.readByte();
       if (entryType == 0) break; // Padding
 
-      long sequence = file.readLong();
-      long timestampMillis = file.readLong();
+      file.readLong(); // sequence
+      file.readLong(); // timestamp
       int dataLength = file.readInt();
 
       if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
         break; // Invalid entry
       }
 
-      // Read data and CRC
-      byte[] data = new byte[dataLength];
-      file.readFully(data);
-      int crc = file.readInt();
+      // Read complete entry data
+      int totalEntrySize = ENTRY_HEADER_SIZE + dataLength;
+      byte[] entryData = new byte[totalEntrySize];
+      file.seek(entryStart);
+      file.readFully(entryData);
+
+      // Deserialize with CRC32 validation
+      WALEntry entry = WALEntry.deserialize(entryData);
 
       // Filter by timestamp range
-      Instant timestamp = Instant.ofEpochMilli(timestampMillis);
-      if (!timestamp.isBefore(fromTs) && !timestamp.isAfter(toTs)) {
-        ByteBuffer dataBuffer = dataLength > 0 ? ByteBuffer.wrap(data) : null;
-        entries.add(new WALEntry(sequence, timestamp, dataBuffer));
+      if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
+        entries.add(entry);
       }
 
       currentPos = file.getFilePointer();

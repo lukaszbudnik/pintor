@@ -145,7 +145,7 @@ Each 4KB page consists of a fixed-size header and a data section that contains t
 |  |  Last Timestamp (8B)                     |  |
 |  |  Entry Count (2B)                        |  |
 |  |  Continuation Flags (2B)                 |  |
-|  |  Header CRC (4B)                         |  |
+|  |  Header CRC32 (4B)                       |  |
 |  +------------------------------------------+  |
 |  |           Data Section (4052 bytes)      |  |
 |  +------------------------------------------+  |
@@ -165,7 +165,7 @@ Each 4KB page consists of a fixed-size header and a data section that contains t
   - Last Timestamp (8B) - Latest entry timestamp milliseconds in page
   - Entry Count (2B) - Number of entries in page
   - Continuation Flags (2B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
-  - Header CRC (4B) - Validates header integrity
+  - Header CRC32 (4B) - Validates header integrity
 - **Data Section (4052 bytes)** - Contains WAL entries or continuation data for entries spanning multiple pages (for more see: [Record Spanning Examples](#record-spanning-examples))
 - **Free Space** - Unused bytes at page end, occurs when:
   - Page is flushed before completely full by either manual sync or read operations (for more see: [Page Flushing to Disk](#page-flushing-to-disk))
@@ -223,7 +223,7 @@ Page 2: [Header: flags=MIDDLE_PART, seq=100-100][4KB continuation data][No free 
 Page 3: [Header: flags=LAST_PART, seq=100-100][2KB final data][Free space]
 ```
 
-Mixed Page (small entry + large entry start + small entry):
+Mixed Page (small entry + large entry + small entry):
 
 ⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
 
@@ -240,21 +240,20 @@ Page 3: [Header: flags=LAST_PART, seq=201-202][1KB final data for seq=201][Entry
 - First/Last sequence in header reflects actual entry sequences in that page
 - Middle pages contain only continuation data, no new entry headers
 
-**Recovery Process:**
-1. Seek to last page boundary in newest file: `fileSize - (fileSize % 4096)`
+### Recovery Process:
+1. Seek to last page boundary in newest file
 2. Read 44-byte page header from the last page
 3. Extract sequence and timestamp metadata instantly from header
 4. Check continuation flags to understand page content type
 5. Total recovery time: O(1) regardless of file size
 
-## **Reading from sequence number range or timestamp range:**
+### Reading from sequence number range or timestamp range
 
 1. Scan all WAL files: Read the first and last page headers from each WAL file
 2. Filter overlapping files: Build a list of WAL files whose sequence/timestamp ranges overlap with the requested range
 3. Process overlapping files: For each overlapping WAL file, read all pages
 4. Skip non-overlapping pages: Within each file, skip pages whose ranges don't overlap with the requested range
 5. Filter and return entries: From overlapping pages, return only WAL entries that fall within the requested range
-
 
 ## API Summary
 
@@ -286,13 +285,9 @@ FileBasedWAL wal = new FileBasedWAL(
 FileBasedWAL wal = new FileBasedWAL(walDirectory);
 ```
 
-## Flexible Data Handling
+### Flexible Data Handling
 
 Pintor's data entries are intentionally designed to use `ByteBuffer` to maximize flexibility. This allows developers to send any data structure - such as JSON, serialized objects, or custom binary formats - without being constrained by a rigid schema. For example, you can include custom fields like transaction IDs, operation types, or metadata in the payload. These fields can later be used for custom filtering during reads or recovery, enabling application-specific logic like transaction tracking or selective replay.
-
-### Using ByteBuffer APIs
-
-Use `ByteBuffer` for structured or high-performance data, enabling precise control over binary formats.
 
 #### Example: JSON with ByteBuffer
 ```java
