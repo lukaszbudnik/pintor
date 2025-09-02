@@ -224,11 +224,6 @@ public class FileBasedWAL implements WriteAheadLog {
       long nextSeq = currentSequenceNumber + 1;
       WALEntry entry = new WALEntry(nextSeq, Instant.now(), data);
 
-      logger.debug(
-          "Creating entry: seq={}, dataSize={} bytes",
-          nextSeq,
-          data != null ? data.remaining() : 0);
-
       writeEntry(entry);
       currentSequenceNumber = nextSeq;
 
@@ -274,12 +269,6 @@ public class FileBasedWAL implements WriteAheadLog {
           batchStartSeq,
           currentSequenceNumber);
 
-      // Check if we need to rotate file
-      if (currentFile.length() > maxFileSize) {
-        logger.debug("File size exceeded after batch, triggering rotation");
-        rotateFile();
-      }
-
       return entries;
     } catch (IOException | WALException e) {
       logger.error("Failed to append batch of {} entries: {}", dataList.size(), e.getMessage());
@@ -295,19 +284,23 @@ public class FileBasedWAL implements WriteAheadLog {
     int entrySize = serializedEntry.length;
 
     logger.debug(
-        "Writing entry: seq={}, serializedSize={} bytes, pageRemaining={} bytes",
+        "Writing entry: seq={}, entrySize={} bytes, pageRemaining={} bytes",
         entry.getSequenceNumber(),
         entrySize,
         currentPageBuffer.remaining());
 
-    // Check if entry is too large for any page
+    // Record spanning not yet implemented
+    // Check if entry is too large for a page and if yes, throw exception
     if (entrySize + ENTRY_HEADER_SIZE > PAGE_DATA_SIZE) {
       logger.error("Entry too large: {} bytes, max: {} bytes", entrySize, PAGE_DATA_SIZE);
       throw new WALException(
           "Entry too large: " + entrySize + " bytes, max: " + PAGE_DATA_SIZE + " bytes");
     }
 
-    // Check if entry fits in current page
+    // Record spanning not yet implemented
+    // Check if entry fits in current page, if not flush current page and start a new one
+    // Entries bigger than the whole page are handled above so at this point we already know that
+    // the entry will fit into a page
     if (currentPageBuffer.remaining() < entrySize + ENTRY_HEADER_SIZE) {
       logger.debug(
           "Page full, flushing current page (entries={}, remaining={} bytes)",
@@ -330,6 +323,18 @@ public class FileBasedWAL implements WriteAheadLog {
     currentPageLastSequence = entry.getSequenceNumber();
     currentPageLastTimestamp = entry.getTimestamp();
     currentPageEntryCount++;
+
+    // Flush current page when remaining space is less than an entry header - meaning current page
+    // cannot take any more entries
+    if (currentPageBuffer.remaining() < ENTRY_HEADER_SIZE) {
+      logger.debug(
+          "Page full, flushing current page (entries={}, remaining={} bytes)",
+          currentPageEntryCount,
+          currentPageBuffer.remaining());
+      // Flush current page and start new one
+      flushCurrentPage();
+      initializeNewPage();
+    }
 
     logger.debug(
         "Entry added to page: entryCount={}, pageUsed={} bytes",
@@ -540,13 +545,7 @@ public class FileBasedWAL implements WriteAheadLog {
       WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
 
       // Read last page header
-      long lastPageOffset = fileSize - (fileSize % PAGE_SIZE);
-
-      // Handle special case when fileSize == pageSize
-      // Then the last page is also the first one
-      if (lastPageOffset == fileSize) {
-        lastPageOffset -= PAGE_SIZE;
-      }
+      long lastPageOffset = fileSize - PAGE_SIZE;
 
       if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
         file.seek(lastPageOffset);
@@ -757,7 +756,7 @@ public class FileBasedWAL implements WriteAheadLog {
       WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
 
       // Read last page header
-      long lastPageOffset = fileSize - (fileSize % PAGE_SIZE);
+      long lastPageOffset = fileSize - PAGE_SIZE;
       if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
         file.seek(lastPageOffset);
         file.readFully(headerData);
