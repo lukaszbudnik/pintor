@@ -40,7 +40,7 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("org.mockito:mockito-core:5.8.0")
     testImplementation("org.mockito:mockito-junit-jupiter:5.10.0")
-    testImplementation("ch.qos.logback:logback-classic:1.4.14")
+    testImplementation("ch.qos.logback:logback-classic:1.5.18")
 }
 
 tasks.test {
