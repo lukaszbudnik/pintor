@@ -36,10 +36,10 @@ jacoco {
 dependencies {
     implementation("org.slf4j:slf4j-api:2.0.17")
 
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("org.mockito:mockito-core:5.8.0")
-    testImplementation("org.mockito:mockito-junit-jupiter:5.10.0")
+    testImplementation("org.mockito:mockito-junit-jupiter:5.13.4")
     testImplementation("ch.qos.logback:logback-classic:1.5.18")
 }
 
