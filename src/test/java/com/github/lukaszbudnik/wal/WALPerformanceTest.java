@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import reactor.core.publisher.Flux;
 
 /**
  * Performance tests for WAL implementation. These tests are tagged as "performance" and excluded
@@ -220,7 +221,7 @@ class WALPerformanceTest {
     // Test reading all entries
     long startTime = System.nanoTime();
 
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
 
     long endTime = System.nanoTime();
     long executionTimeNs = endTime - startTime;
@@ -384,17 +385,23 @@ class WALPerformanceTest {
     assertEquals(TOTAL_ENTRIES - 1, wal.getCurrentSequenceNumber());
 
     // Test optimized range queries work correctly
-    List<WALEntry> middleRange = wal.readRange(TOTAL_ENTRIES / 2 - 5, TOTAL_ENTRIES / 2 + 5);
+    List<WALEntry> middleRange =
+        Flux.from(wal.readRange(TOTAL_ENTRIES / 2 - 5, TOTAL_ENTRIES / 2 + 5))
+            .collectList()
+            .block();
     assertEquals(11, middleRange.size());
 
     // Test timestamp-based queries work correctly
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(TOTAL_ENTRIES, allEntries.size());
 
     Instant firstTimestamp = allEntries.get(0).getTimestamp();
     Instant lastTimestamp = allEntries.get(allEntries.size() - 1).getTimestamp();
 
-    List<WALEntry> timestampRange = wal.readRange(firstTimestamp, firstTimestamp.plusSeconds(1));
+    List<WALEntry> timestampRange =
+        Flux.from(wal.readRange(firstTimestamp, firstTimestamp.plusSeconds(1)))
+            .collectList()
+            .block();
     assertTrue(timestampRange.size() > 0, "Should find entries in timestamp range");
 
     long verifyEndTime = System.nanoTime();

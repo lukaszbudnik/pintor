@@ -10,6 +10,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
 
 /**
  * Test CRC32 validation for both page headers and WAL entries. Verifies that corruption is properly
@@ -41,7 +43,7 @@ class CRC32ValidationTest {
     wal.sync();
 
     // Reading should work fine with valid CRC32
-    List<WALEntry> entries = wal.readFrom(0L);
+    List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(2, entries.size());
     assertEquals("test data 1", new String(entries.get(0).getDataAsBytes()));
     assertEquals("test data 2", new String(entries.get(1).getDataAsBytes()));
@@ -64,18 +66,21 @@ class CRC32ValidationTest {
       file.writeInt(0xBADC0DE); // Write invalid CRC32
     }
 
-    // Reopen WAL and try to read - should detect corruption and throw exception
+    // Reopen WAL and try to read - should detect corruption and emit error
     wal = new FileBasedWAL(tempDir);
 
-    WALException exception =
+    Exception exception =
         assertThrows(
-            WALException.class,
+            Exception.class,
             () -> {
-              wal.readFrom(0L);
+              Flux.from(wal.readFrom(0L)).blockLast();
             });
 
-    assertTrue(exception.getMessage().contains("Corrupted page"));
-    assertTrue(exception.getCause().getMessage().contains("Entry CRC32 validation failed"));
+    // Unwrap ReactiveException to get the actual WALException
+    Throwable cause = Exceptions.unwrap(exception);
+    assertTrue(cause instanceof WALException);
+    assertTrue(cause.getMessage().contains("Corrupted page"));
+    assertTrue(cause.getCause().getMessage().contains("Entry CRC32 validation failed"));
   }
 
   @Test
@@ -122,18 +127,21 @@ class CRC32ValidationTest {
       file.writeByte(0xFF); // Corrupt first byte of "test data"
     }
 
-    // Reopen WAL and try to read - should detect corruption and throw exception
+    // Reopen WAL and try to read - should detect corruption and emit error
     wal = new FileBasedWAL(tempDir);
 
-    WALException exception =
+    Exception exception =
         assertThrows(
-            WALException.class,
+            Exception.class,
             () -> {
-              wal.readFrom(0L);
+              Flux.from(wal.readFrom(0L)).blockLast();
             });
 
-    assertTrue(exception.getMessage().contains("Corrupted page"));
-    assertTrue(exception.getCause().getMessage().contains("Entry CRC32 validation failed"));
+    // Unwrap ReactiveException to get the actual WALException
+    Throwable cause = Exceptions.unwrap(exception);
+    assertTrue(cause instanceof WALException);
+    assertTrue(cause.getMessage().contains("Corrupted page"));
+    assertTrue(cause.getCause().getMessage().contains("Entry CRC32 validation failed"));
   }
 
   @Test
@@ -153,18 +161,21 @@ class CRC32ValidationTest {
       file.writeLong(999L); // Change sequence from 0 to 999
     }
 
-    // Reopen WAL and try to read - should detect corruption and throw exception
+    // Reopen WAL and try to read - should detect corruption and emit error
     wal = new FileBasedWAL(tempDir);
 
-    WALException exception =
+    Exception exception =
         assertThrows(
-            WALException.class,
+            Exception.class,
             () -> {
-              wal.readFrom(0L);
+              Flux.from(wal.readFrom(0L)).blockLast();
             });
 
-    assertTrue(exception.getMessage().contains("Corrupted page"));
-    assertTrue(exception.getCause().getMessage().contains("Entry CRC32 validation failed"));
+    // Unwrap ReactiveException to get the actual WALException
+    Throwable cause = Exceptions.unwrap(exception);
+    assertTrue(cause instanceof WALException);
+    assertTrue(cause.getMessage().contains("Corrupted page"));
+    assertTrue(cause.getCause().getMessage().contains("Entry CRC32 validation failed"));
   }
 
   @Test
@@ -179,7 +190,7 @@ class CRC32ValidationTest {
 
     // Verify all entries are readable before corruption
     wal = new FileBasedWAL(tempDir);
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(3, allEntries.size());
     wal.close();
 
@@ -195,14 +206,17 @@ class CRC32ValidationTest {
     // Reopen WAL and try to read - should fail on corrupted page
     wal = new FileBasedWAL(tempDir);
 
-    WALException exception =
+    Exception exception =
         assertThrows(
-            WALException.class,
+            Exception.class,
             () -> {
-              wal.readFrom(0L);
+              Flux.from(wal.readFrom(0L)).blockLast();
             });
 
-    assertTrue(exception.getMessage().contains("Corrupted page"));
-    assertTrue(exception.getCause().getMessage().contains("Entry CRC32 validation failed"));
+    // Unwrap ReactiveException to get the actual WALException
+    Throwable cause = Exceptions.unwrap(exception);
+    assertTrue(cause instanceof WALException);
+    assertTrue(cause.getMessage().contains("Corrupted page"));
+    assertTrue(cause.getCause().getMessage().contains("Entry CRC32 validation failed"));
   }
 }

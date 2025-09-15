@@ -3,6 +3,7 @@ package com.github.lukaszbudnik.wal;
 import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.List;
+import org.reactivestreams.Publisher;
 
 /**
  * Interface defining the contract for Write Ahead Log implementations.
@@ -43,39 +44,35 @@ public interface WriteAheadLog extends AutoCloseable {
    * Read entries starting from the given sequence number
    *
    * @param fromSequenceNumber the starting sequence number (inclusive)
-   * @return list of entries
-   * @throws WALException if the operation fails
+   * @return publisher of entries
    */
-  List<WALEntry> readFrom(long fromSequenceNumber) throws WALException;
+  Publisher<WALEntry> readFrom(long fromSequenceNumber);
 
   /**
    * Read entries in a sequence number range
    *
    * @param fromSequenceNumber the starting sequence number (inclusive)
    * @param toSequenceNumber the ending sequence number (inclusive)
-   * @return list of entries
-   * @throws WALException if the operation fails
+   * @return publisher of entries
    */
-  List<WALEntry> readRange(long fromSequenceNumber, long toSequenceNumber) throws WALException;
+  Publisher<WALEntry> readRange(long fromSequenceNumber, long toSequenceNumber);
 
   /**
    * Read entries starting from the given timestamp
    *
    * @param fromTimestamp the starting timestamp (inclusive)
-   * @return list of entries with timestamps >= fromTimestamp
-   * @throws WALException if the operation fails
+   * @return publisher of entries with timestamps >= fromTimestamp
    */
-  List<WALEntry> readFrom(Instant fromTimestamp) throws WALException;
+  Publisher<WALEntry> readFrom(Instant fromTimestamp);
 
   /**
    * Read entries in a timestamp range
    *
    * @param fromTimestamp the starting timestamp (inclusive)
    * @param toTimestamp the ending timestamp (inclusive)
-   * @return list of entries with timestamps in the specified range
-   * @throws WALException if the operation fails
+   * @return publisher of entries with timestamps in the specified range
    */
-  List<WALEntry> readRange(Instant fromTimestamp, Instant toTimestamp) throws WALException;
+  Publisher<WALEntry> readRange(Instant fromTimestamp, Instant toTimestamp);
 
   /**
    * Get the current sequence number (last written entry)

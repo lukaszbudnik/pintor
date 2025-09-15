@@ -257,32 +257,36 @@ Page 3: [Header: flags=LAST_PART, seq=201-202][1KB final data for seq=201][Entry
 
 ## API Summary
 
-### FileBasedWAL
+Pintor is lightweight with minimal external dependencies, relying only on:
+- [Project Reactor](https://projectreactor.io/) for streaming large amounts of data efficiently. All read operations return reactive `Publisher<WALEntry>`  that enable backpressure handling and prevent memory exhaustion when processing large datasets.
+- [SLF4J](https://www.slf4j.org/) for structured logging and diagnostics.
 
-- `createAndAppend(ByteBuffer data)`: Create single entry from ByteBuffer.
-- `createAndAppendBatch(List<ByteBuffer> dataList)`: Batch create from ByteBuffers.
-- `readFrom(long fromSequenceNumber)`: Read entries from sequence number.
-- `readFrom(Instant fromTimestamp)`: Read entries from timestamp.
-- `readRange(long fromSequenceNumber, long toSequenceNumber)`: Read entries in sequence range.
-- `readRange(Instant fromTimestamp, Instant toTimestamp)`: Read entries in timestamp range.
-- `sync()`: Force sync to disk.
-- `truncate(long upToSequenceNumber)`: Truncate log up to sequence.
-- `getCurrentSequenceNumber()`: Get last sequence number.
-- `getNextSequenceNumber()`: Get next available sequence.
-- `size()`: Get entry count.
-- `isEmpty()`: Check if WAL is empty.
+### WriteAheadLog
+
+- `WALEntry createAndAppend(ByteBuffer data)`: Create single entry from ByteBuffer.
+- `List<WALEntry> createAndAppendBatch(List<ByteBuffer> dataList)`: Batch create from ByteBuffers.
+- `Publisher<WALEntry> readFrom(long fromSequenceNumber)`: Read entries from sequence number.
+- `Publisher<WALEntry> readFrom(Instant fromTimestamp)`: Read entries from timestamp.
+- `Publisher<WALEntry> readRange(long fromSequenceNumber, long toSequenceNumber)`: Read entries in sequence range.
+- `Publisher<WALEntry> readRange(Instant fromTimestamp, Instant toTimestamp)`: Read entries in timestamp range.
+- `void sync()`: Force sync to disk.
+- `void truncate(long upToSequenceNumber)`: Truncate log up to sequence.
+- `long getCurrentSequenceNumber()`: Get last sequence number.
+- `long getNextSequenceNumber()`: Get next available sequence.
+- `long size()`: Get entry count.
+- `boolean isEmpty()`: Check if WAL is empty.
 
 ### Configuration
 
 ```java
 // Custom configuration
-FileBasedWAL wal = new FileBasedWAL(
+WriteAheadLog wal = new FileBasedWAL(
     walDirectory,
     64 * 1024 * 1024  // max file size (default: 64MB)
 );
 
 // Or use default settings
-FileBasedWAL wal = new FileBasedWAL(walDirectory);
+WriteAheadLog wal = new FileBasedWAL(walDirectory);
 ```
 
 ### Flexible Data Handling
@@ -291,7 +295,7 @@ Pintor's data entries are intentionally designed to use `ByteBuffer` to maximize
 
 #### Example: JSON with ByteBuffer
 ```java
-try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
+try (WriteAheadLog wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
     ByteBuffer jsonData = ByteBuffer.wrap("{\"txnId\":\"txn_4001\",\"operation\":\"INSERT\"}".getBytes());
     WALEntry entry = wal.createAndAppend(jsonData);
 }
@@ -299,7 +303,7 @@ try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
 
 #### Example: Structured Data with ByteBuffer
 ```java
-try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
+try (WriteAheadLog wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
     ByteBuffer buffer = ByteBuffer.allocate(128)
         .putInt(4001) // Transaction ID
         .put("INSERT".getBytes());

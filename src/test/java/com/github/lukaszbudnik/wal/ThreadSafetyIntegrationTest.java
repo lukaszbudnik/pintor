@@ -12,6 +12,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import reactor.core.publisher.Flux;
 
 /** Integration test to demonstrate that the thread safety issues have been fixed. */
 class ThreadSafetyIntegrationTest {
@@ -92,7 +93,7 @@ class ThreadSafetyIntegrationTest {
     }
 
     // Verify all entries are persisted correctly
-    List<WALEntry> persistedEntries = wal.readFrom(0L);
+    List<WALEntry> persistedEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(numThreads * entriesPerThread, persistedEntries.size());
 
     // Verify sequence numbers in persisted entries are also consecutive
@@ -160,7 +161,7 @@ class ThreadSafetyIntegrationTest {
     wal.sync();
 
     // Verify persistence
-    List<WALEntry> persistedEntries = wal.readFrom(0L);
+    List<WALEntry> persistedEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(numThreads * batchSize, persistedEntries.size());
   }
 
@@ -228,7 +229,7 @@ class ThreadSafetyIntegrationTest {
     wal.sync();
 
     // Verify total count and sequence integrity
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(totalExpected, allEntries.size());
 
     // Verify consecutive sequence numbers
