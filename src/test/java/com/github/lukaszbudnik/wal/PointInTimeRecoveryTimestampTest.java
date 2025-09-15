@@ -11,6 +11,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import reactor.core.publisher.Flux;
 
 /**
  * Integration test demonstrating timestamp-based reading capabilities for point-in-time recovery
@@ -89,32 +90,36 @@ class PointInTimeRecoveryTimestampTest {
     // Test point-in-time recovery scenarios
 
     // 1. Recover to end of Phase 1 (should have Alice and Bob)
-    List<WALEntry> phase1Entries = wal.readRange(phase1Start, phase1End);
+    List<WALEntry> phase1Entries =
+        Flux.from(wal.readRange(phase1Start, phase1End)).collectList().block();
     assertEquals(4, phase1Entries.size());
     assertTrue(containsOperation(phase1Entries, "INSERT", "Alice"));
     assertTrue(containsOperation(phase1Entries, "INSERT", "Bob"));
     assertFalse(containsOperation(phase1Entries, "UPDATE", "Alice Smith"));
 
     // 2. Recover to end of Phase 2 (should have Alice updated, Bob deleted)
-    List<WALEntry> phase1And2Entries = wal.readRange(phase1Start, phase2End);
+    List<WALEntry> phase1And2Entries =
+        Flux.from(wal.readRange(phase1Start, phase2End)).collectList().block();
     assertEquals(8, phase1And2Entries.size());
     assertTrue(containsOperation(phase1And2Entries, "UPDATE", "Alice Smith"));
     assertTrue(containsOperation(phase1And2Entries, "DELETE", "users|2"));
 
     // 3. Recover everything (should include Charlie)
-    List<WALEntry> allEntries = wal.readFrom(phase1Start);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(phase1Start)).collectList().block();
     assertEquals(11, allEntries.size());
     assertTrue(containsOperation(allEntries, "INSERT", "Charlie"));
 
     // 4. Recover only Phase 2 operations
-    List<WALEntry> phase2Only = wal.readRange(phase2Start, phase2End);
+    List<WALEntry> phase2Only =
+        Flux.from(wal.readRange(phase2Start, phase2End)).collectList().block();
     assertEquals(4, phase2Only.size());
     assertTrue(containsOperation(phase2Only, "UPDATE", "Alice Smith"));
     assertTrue(containsOperation(phase2Only, "DELETE", "users|2"));
     assertFalse(containsOperation(phase2Only, "INSERT", "Charlie"));
 
     // 5. Test reading from future timestamp (should be empty)
-    List<WALEntry> futureEntries = wal.readFrom(Instant.now().plusSeconds(60));
+    List<WALEntry> futureEntries =
+        Flux.from(wal.readFrom(Instant.now().plusSeconds(60))).collectList().block();
     assertTrue(futureEntries.isEmpty());
   }
 
@@ -148,7 +153,8 @@ class PointInTimeRecoveryTimestampTest {
     }
 
     // Read the batch by timestamp
-    List<WALEntry> batchByTime = wal.readRange(beforeBatch, afterBatch);
+    List<WALEntry> batchByTime =
+        Flux.from(wal.readRange(beforeBatch, afterBatch)).collectList().block();
     assertEquals(5, batchByTime.size());
 
     // Verify all batch entries are included and in correct order
@@ -183,7 +189,7 @@ class PointInTimeRecoveryTimestampTest {
     Instant end = Instant.now();
 
     // Read by timestamp range
-    List<WALEntry> rapidEntries = wal.readRange(start, end);
+    List<WALEntry> rapidEntries = Flux.from(wal.readRange(start, end)).collectList().block();
     assertEquals(3, rapidEntries.size());
 
     // Verify sequence order is maintained even with very close timestamps
@@ -225,7 +231,7 @@ class PointInTimeRecoveryTimestampTest {
     }
 
     // Read entries between before and after
-    List<WALEntry> entries = wal.readRange(before, after);
+    List<WALEntry> entries = Flux.from(wal.readRange(before, after)).collectList().block();
     assertEquals(500, entries.size());
   }
 

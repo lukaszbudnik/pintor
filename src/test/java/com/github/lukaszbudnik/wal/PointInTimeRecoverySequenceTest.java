@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import reactor.core.publisher.Flux;
 
 /**
  * Integration test demonstrating sequence-based reading capabilities for point-in-time recovery
@@ -78,7 +79,7 @@ class PointInTimeRecoverySequenceTest {
     // Test sequence-based point-in-time recovery scenarios
 
     // 1. Recover to end of Phase 1 (sequences 0-3)
-    List<WALEntry> phase1Entries = wal.readRange(0L, phase1EndSeq);
+    List<WALEntry> phase1Entries = Flux.from(wal.readRange(0L, phase1EndSeq)).collectList().block();
     assertEquals(4, phase1Entries.size());
     assertTrue(containsOperation(phase1Entries, "INSERT", "Alice"));
     assertTrue(containsOperation(phase1Entries, "INSERT", "Bob"));
@@ -90,18 +91,20 @@ class PointInTimeRecoverySequenceTest {
     }
 
     // 2. Recover to end of Phase 2 (sequences 0-7)
-    List<WALEntry> phase1And2Entries = wal.readRange(0L, phase2EndSeq);
+    List<WALEntry> phase1And2Entries =
+        Flux.from(wal.readRange(0L, phase2EndSeq)).collectList().block();
     assertEquals(8, phase1And2Entries.size());
     assertTrue(containsOperation(phase1And2Entries, "UPDATE", "Alice Smith"));
     assertTrue(containsOperation(phase1And2Entries, "DELETE", "users|2"));
 
     // 3. Recover everything from sequence 0
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(11, allEntries.size());
     assertTrue(containsOperation(allEntries, "INSERT", "Charlie"));
 
     // 4. Recover only Phase 2 operations (sequences 4-7)
-    List<WALEntry> phase2Only = wal.readRange(phase1EndSeq + 1, phase2EndSeq);
+    List<WALEntry> phase2Only =
+        Flux.from(wal.readRange(phase1EndSeq + 1, phase2EndSeq)).collectList().block();
     assertEquals(4, phase2Only.size());
     assertTrue(containsOperation(phase2Only, "UPDATE", "Alice Smith"));
     assertTrue(containsOperation(phase2Only, "DELETE", "users|2"));
@@ -138,7 +141,7 @@ class PointInTimeRecoverySequenceTest {
     }
 
     // Read the batch by sequence range
-    List<WALEntry> batchBySequence = wal.readRange(0L, 4L);
+    List<WALEntry> batchBySequence = Flux.from(wal.readRange(0L, 4L)).collectList().block();
     assertEquals(5, batchBySequence.size());
 
     // Verify all batch entries are included and in correct order
@@ -154,7 +157,7 @@ class PointInTimeRecoverySequenceTest {
     }
 
     // Test partial batch recovery (only first 3 entries)
-    List<WALEntry> partialBatch = wal.readRange(0L, 2L);
+    List<WALEntry> partialBatch = Flux.from(wal.readRange(0L, 2L)).collectList().block();
     assertEquals(3, partialBatch.size());
     assertTrue(containsOperation(partialBatch, "BEGIN", "txn_batch"));
     assertTrue(containsOperation(partialBatch, "INSERT", "Laptop"));
@@ -177,7 +180,7 @@ class PointInTimeRecoverySequenceTest {
       // Test recovery across multiple files
 
       // 1. Read first 10 entries
-      List<WALEntry> first10 = smallWal.readRange(0L, 9L);
+      List<WALEntry> first10 = Flux.from(smallWal.readRange(0L, 9L)).collectList().block();
       assertEquals(10, first10.size());
       for (int i = 0; i < 10; i++) {
         assertEquals(i, first10.get(i).getSequenceNumber());
@@ -185,14 +188,14 @@ class PointInTimeRecoverySequenceTest {
       }
 
       // 2. Read middle range (might span files)
-      List<WALEntry> middle = smallWal.readRange(5L, 14L);
+      List<WALEntry> middle = Flux.from(smallWal.readRange(5L, 14L)).collectList().block();
       assertEquals(10, middle.size());
       for (int i = 0; i < 10; i++) {
         assertEquals(5 + i, middle.get(i).getSequenceNumber());
       }
 
       // 3. Read all entries
-      List<WALEntry> allEntries = smallWal.readFrom(0L);
+      List<WALEntry> allEntries = Flux.from(smallWal.readFrom(0L)).collectList().block();
       assertEquals(20, allEntries.size());
 
       // Verify sequence continuity across files
@@ -201,7 +204,7 @@ class PointInTimeRecoverySequenceTest {
       }
 
       // 4. Read from middle to end
-      List<WALEntry> fromMiddle = smallWal.readFrom(10L);
+      List<WALEntry> fromMiddle = Flux.from(smallWal.readFrom(10L)).collectList().block();
       assertEquals(10, fromMiddle.size());
       assertEquals(10L, fromMiddle.get(0).getSequenceNumber());
       assertEquals(19L, fromMiddle.get(9).getSequenceNumber());
@@ -229,14 +232,16 @@ class PointInTimeRecoverySequenceTest {
     // Test checkpoint-based recovery
 
     // 1. Recover only operations before checkpoint
-    List<WALEntry> beforeCheckpoint = wal.readRange(0L, checkpointSeq);
+    List<WALEntry> beforeCheckpoint =
+        Flux.from(wal.readRange(0L, checkpointSeq)).collectList().block();
     assertEquals(10, beforeCheckpoint.size());
     for (int i = 0; i < 10; i++) {
       assertTrue(new String(beforeCheckpoint.get(i).getDataAsBytes()).contains("OPERATION|" + i));
     }
 
     // 2. Recover only operations after checkpoint
-    List<WALEntry> afterCheckpoint = wal.readFrom(checkpointSeq + 1);
+    List<WALEntry> afterCheckpoint =
+        Flux.from(wal.readFrom(checkpointSeq + 1)).collectList().block();
     assertEquals(10, afterCheckpoint.size());
     for (int i = 0; i < 10; i++) {
       assertTrue(
@@ -245,7 +250,8 @@ class PointInTimeRecoverySequenceTest {
     }
 
     // 3. Test incremental recovery (simulate applying checkpoint + incremental changes)
-    List<WALEntry> incremental = wal.readRange(checkpointSeq + 1, checkpointSeq + 5);
+    List<WALEntry> incremental =
+        Flux.from(wal.readRange(checkpointSeq + 1, checkpointSeq + 5)).collectList().block();
     assertEquals(5, incremental.size());
     assertEquals(10L, incremental.get(0).getSequenceNumber());
     assertEquals(14L, incremental.get(4).getSequenceNumber());
@@ -269,7 +275,8 @@ class PointInTimeRecoverySequenceTest {
     // Note: No COMMIT - transaction failed
 
     // Recovery: Read only up to the good transaction
-    List<WALEntry> recoveryEntries = wal.readRange(0L, goodTransactionEnd);
+    List<WALEntry> recoveryEntries =
+        Flux.from(wal.readRange(0L, goodTransactionEnd)).collectList().block();
     assertEquals(3, recoveryEntries.size());
 
     // Verify we only have the good transaction
@@ -298,7 +305,7 @@ class PointInTimeRecoverySequenceTest {
     }
 
     // Read all entries
-    List<WALEntry> entries = wal.readRange(500L, 600L);
+    List<WALEntry> entries = Flux.from(wal.readRange(500L, 600L)).collectList().block();
     assertEquals(101, entries.size());
 
     // Verify sequence continuity across files

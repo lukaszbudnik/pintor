@@ -35,12 +35,14 @@ jacoco {
 
 dependencies {
     implementation("org.slf4j:slf4j-api:2.0.17")
+    implementation("io.projectreactor:reactor-core:3.7.6")
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("org.mockito:mockito-core:5.8.0")
     testImplementation("org.mockito:mockito-junit-jupiter:5.19.0")
     testImplementation("ch.qos.logback:logback-classic:1.5.18")
+    testImplementation("io.projectreactor:reactor-test:3.6.10")
 }
 
 tasks.test {

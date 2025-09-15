@@ -12,6 +12,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+import reactor.test.StepVerifier;
 
 class FileBasedWALTest {
 
@@ -74,7 +77,7 @@ class FileBasedWALTest {
     assertEquals(4L, wal.size());
 
     // Verify all entries can be read back
-    List<WALEntry> entries = wal.readFrom(0L);
+    List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(4, entries.size());
     assertEquals("INSERT|txn_1001|data1", new String(entries.get(0).getDataAsBytes()));
     assertEquals("UPDATE|txn_1002|data2", new String(entries.get(1).getDataAsBytes()));
@@ -106,7 +109,7 @@ class FileBasedWALTest {
   @Test
   void testReadOperations() throws WALException {
     // Test reading from empty WAL
-    List<WALEntry> emptyEntries = wal.readFrom(0L);
+    List<WALEntry> emptyEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertTrue(emptyEntries.isEmpty());
 
     // Add test data
@@ -115,27 +118,27 @@ class FileBasedWALTest {
     }
 
     // Test readFrom
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(5, allEntries.size());
     for (int i = 0; i < 5; i++) {
       assertEquals(i, allEntries.get(i).getSequenceNumber());
     }
 
     // Test readFrom with higher starting sequence
-    List<WALEntry> partialEntries = wal.readFrom(2L);
+    List<WALEntry> partialEntries = Flux.from(wal.readFrom(2L)).collectList().block();
     assertEquals(3, partialEntries.size());
     assertEquals(2L, partialEntries.get(0).getSequenceNumber());
     assertEquals(4L, partialEntries.get(2).getSequenceNumber());
 
     // Test readRange
-    List<WALEntry> rangeEntries = wal.readRange(1L, 3L);
+    List<WALEntry> rangeEntries = Flux.from(wal.readRange(1L, 3L)).collectList().block();
     assertEquals(3, rangeEntries.size());
     assertEquals(1L, rangeEntries.get(0).getSequenceNumber());
     assertEquals(2L, rangeEntries.get(1).getSequenceNumber());
     assertEquals(3L, rangeEntries.get(2).getSequenceNumber());
 
     // Test readRange with single entry
-    List<WALEntry> singleEntry = wal.readRange(2L, 2L);
+    List<WALEntry> singleEntry = Flux.from(wal.readRange(2L, 2L)).collectList().block();
     assertEquals(1, singleEntry.size());
     assertEquals(2L, singleEntry.get(0).getSequenceNumber());
   }
@@ -202,7 +205,7 @@ class FileBasedWALTest {
 
     wal.sync(); // Force write to disk
 
-    List<WALEntry> readEntries = wal.readFrom(0L);
+    List<WALEntry> readEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(1, readEntries.size());
 
     WALEntry readEntry = readEntries.get(0);
@@ -234,7 +237,7 @@ class FileBasedWALTest {
     wal.createAndAppendBatch(testDataList);
 
     // All entries should be readable and intact
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(10, allEntries.size());
 
     // Verify first entry is still intact
@@ -266,7 +269,7 @@ class FileBasedWALTest {
     assertFalse(newWal.isEmpty());
 
     // Verify all data is recovered exactly
-    List<WALEntry> recoveredEntries = newWal.readFrom(0L);
+    List<WALEntry> recoveredEntries = Flux.from(newWal.readFrom(0L)).collectList().block();
     assertEquals(2, recoveredEntries.size());
 
     // Verify first entry
@@ -306,7 +309,7 @@ class FileBasedWALTest {
       smallWal.sync();
 
       // Verify all entries are still readable after rotation
-      List<WALEntry> entries = smallWal.readFrom(0L);
+      List<WALEntry> entries = Flux.from(smallWal.readFrom(0L)).collectList().block();
       assertEquals(50, entries.size());
 
       // Verify entries are in correct order
@@ -347,7 +350,7 @@ class FileBasedWALTest {
     assertEquals(999L, wal.getCurrentSequenceNumber());
 
     // Verify remaining entries
-    List<WALEntry> remainingEntries = wal.readFrom(0L);
+    List<WALEntry> remainingEntries = Flux.from(wal.readFrom(0L)).collectList().block();
 
     // Pintor truncates by removing whole files, it doesn't update the files or pages
     // so when we truncate to 500 we may actually still have a file with entries 498, 499, 500, 501,
@@ -369,7 +372,7 @@ class FileBasedWALTest {
     assertEquals(1000L, wal.getCurrentSequenceNumber());
 
     // Verify the new entry is readable
-    List<WALEntry> afterAppend = wal.readFrom(1000L);
+    List<WALEntry> afterAppend = Flux.from(wal.readFrom(1000L)).collectList().block();
     assertEquals(1, afterAppend.size());
     assertEquals("INSERT|txn_new|after_truncate", new String(afterAppend.get(0).getDataAsBytes()));
   }
@@ -383,7 +386,7 @@ class FileBasedWALTest {
     assertDoesNotThrow(() -> wal.sync());
 
     // Data should still be readable after sync
-    List<WALEntry> entries = wal.readFrom(0L);
+    List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(1, entries.size());
     assertEquals("INSERT|txn_1001|data", new String(entries.get(0).getDataAsBytes()));
 
@@ -415,7 +418,7 @@ class FileBasedWALTest {
   //    wal.sync();
   //
   //    // Verify both large entries can be read back correctly
-  //    List<WALEntry> entries = wal.readFrom(0L);
+  //    List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
   //    assertEquals(2, entries.size());
   //
   //    // Verify large binary data
@@ -445,10 +448,15 @@ class FileBasedWALTest {
     FileBasedWAL freshWal = new FileBasedWAL(tempDir.resolve("fresh"));
 
     // Test invalid range
-    assertThrows(WALException.class, () -> freshWal.readRange(10L, 5L));
+    Exception exception =
+        assertThrows(
+            Exception.class, () -> Flux.from(freshWal.readRange(10L, 5L)).collectList().block());
+    Throwable cause = Exceptions.unwrap(exception);
+    assertTrue(cause instanceof WALException);
+    assertTrue(cause.getMessage().contains("Invalid range"));
 
     // Test reading from non-existent sequence
-    List<WALEntry> nonExistent = freshWal.readFrom(1000L);
+    List<WALEntry> nonExistent = Flux.from(freshWal.readFrom(1000L)).collectList().block();
     assertTrue(nonExistent.isEmpty());
 
     // Test that we can create entries normally
@@ -456,7 +464,7 @@ class FileBasedWALTest {
     assertNotNull(validEntry);
 
     // Test that we can read the valid entry
-    List<WALEntry> validEntries = freshWal.readFrom(0L);
+    List<WALEntry> validEntries = Flux.from(freshWal.readFrom(0L)).collectList().block();
     assertEquals(1, validEntries.size());
     assertEquals("valid", new String(validEntries.get(0).getDataAsBytes()));
 
@@ -483,7 +491,7 @@ class FileBasedWALTest {
     assertEquals("data3", new String(entry3.getDataAsBytes()));
 
     // Verify entries are persisted
-    List<WALEntry> entries = wal.readFrom(0L);
+    List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(3, entries.size());
     assertEquals("data1", new String(entries.get(0).getDataAsBytes()));
     assertEquals("data2", new String(entries.get(1).getDataAsBytes()));
@@ -517,7 +525,7 @@ class FileBasedWALTest {
     assertNull(entries.get(3).getDataAsBytes());
 
     // Verify persistence
-    List<WALEntry> readEntries = wal.readFrom(0L);
+    List<WALEntry> readEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(4, readEntries.size());
     for (int i = 0; i < 4; i++) {
       assertEquals(entries.get(i).getSequenceNumber(), readEntries.get(i).getSequenceNumber());
@@ -561,7 +569,7 @@ class FileBasedWALTest {
     assertEquals(3L, entry2.getSequenceNumber());
 
     // Verify all entries
-    List<WALEntry> allEntries = wal.readFrom(0L);
+    List<WALEntry> allEntries = Flux.from(wal.readFrom(0L)).collectList().block();
     assertEquals(4, allEntries.size());
     assertEquals("single_api_1", new String(allEntries.get(0).getDataAsBytes()));
     assertEquals("batch_1", new String(allEntries.get(1).getDataAsBytes()));
@@ -597,26 +605,33 @@ class FileBasedWALTest {
     WALEntry entry4 = wal.createAndAppend(ByteBuffer.wrap("entry4".getBytes()));
 
     // Test readFrom(timestamp)
-    List<WALEntry> fromMid = wal.readFrom(midTime);
+    List<WALEntry> fromMid = Flux.from(wal.readFrom(midTime)).collectList().block();
     assertEquals(3, fromMid.size()); // Should include entry2, entry3, entry4
     assertEquals("entry2", new String(fromMid.get(0).getDataAsBytes()));
 
     // Test readRange(timestamp, timestamp)
-    List<WALEntry> midRange = wal.readRange(midTime, endTime);
+    List<WALEntry> midRange = Flux.from(wal.readRange(midTime, endTime)).collectList().block();
     assertEquals(2, midRange.size()); // Should include entry2, entry3
     assertEquals("entry2", new String(midRange.get(0).getDataAsBytes()));
     assertEquals("entry3", new String(midRange.get(1).getDataAsBytes()));
 
     // Test with very early timestamp (should get all entries)
-    List<WALEntry> fromStart = wal.readFrom(startTime);
+    List<WALEntry> fromStart = Flux.from(wal.readFrom(startTime)).collectList().block();
     assertEquals(4, fromStart.size());
 
     // Test with future timestamp (should get no entries)
-    List<WALEntry> fromFuture = wal.readFrom(Instant.now().plusSeconds(60));
+    List<WALEntry> fromFuture =
+        Flux.from(wal.readFrom(Instant.now().plusSeconds(60))).collectList().block();
     assertTrue(fromFuture.isEmpty());
 
     // Test invalid range (from > to)
-    assertThrows(WALException.class, () -> wal.readRange(endTime, startTime));
+    Exception exception =
+        assertThrows(
+            Exception.class,
+            () -> Flux.from(wal.readRange(endTime, startTime)).collectList().block());
+    Throwable cause = Exceptions.unwrap(exception);
+    assertTrue(cause instanceof WALException);
+    assertTrue(cause.getMessage().contains("Invalid range"));
   }
 
   @Test
@@ -637,7 +652,8 @@ class FileBasedWALTest {
     Instant afterBatch = Instant.now();
 
     // All batch entries should have very similar timestamps
-    List<WALEntry> batchByTime = wal.readRange(beforeBatch, afterBatch);
+    List<WALEntry> batchByTime =
+        Flux.from(wal.readRange(beforeBatch, afterBatch)).collectList().block();
     assertEquals(3, batchByTime.size());
 
     // Verify the entries are in correct sequence order
@@ -667,7 +683,8 @@ class FileBasedWALTest {
       Instant endTime = Instant.now();
 
       // Read all entries by timestamp
-      List<WALEntry> allByTime = smallWal.readRange(startTime, endTime);
+      List<WALEntry> allByTime =
+          Flux.from(smallWal.readRange(startTime, endTime)).collectList().block();
       assertEquals(20, allByTime.size());
 
       // Verify entries are in correct sequence order
@@ -676,5 +693,27 @@ class FileBasedWALTest {
         assertTrue(new String(allByTime.get(i).getDataAsBytes()).startsWith("entry_" + i));
       }
     }
+  }
+
+  @Test
+  void testStreamingWithBackpressure() throws WALException {
+    // Create test data
+    for (int i = 0; i < 10; i++) {
+      wal.createAndAppend(ByteBuffer.wrap(("stream_entry_" + i).getBytes()));
+    }
+
+    // Test streaming with StepVerifier
+    StepVerifier.create(wal.readFrom(0L)).expectNextCount(10).verifyComplete();
+
+    // Test streaming with limited demand
+    StepVerifier.create(wal.readRange(2L, 5L))
+        .expectNextMatches(entry -> entry.getSequenceNumber() == 2L)
+        .expectNextMatches(entry -> entry.getSequenceNumber() == 3L)
+        .expectNextMatches(entry -> entry.getSequenceNumber() == 4L)
+        .expectNextMatches(entry -> entry.getSequenceNumber() == 5L)
+        .verifyComplete();
+
+    // Test cancellation
+    StepVerifier.create(wal.readFrom(0L)).expectNextCount(3).thenCancel().verify();
   }
 }
