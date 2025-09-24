@@ -42,7 +42,7 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.20.0")
     testImplementation("org.mockito:mockito-junit-jupiter:5.20.0")
     testImplementation("ch.qos.logback:logback-classic:1.5.18")
-    testImplementation("io.projectreactor:reactor-test:3.6.10")
+    testImplementation("io.projectreactor:reactor-test:3.7.11")
 }
 
 tasks.test {
