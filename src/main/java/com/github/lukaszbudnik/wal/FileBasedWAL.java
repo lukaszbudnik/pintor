@@ -281,7 +281,7 @@ public class FileBasedWAL implements WriteAheadLog {
     }
   }
 
-  /** Write entry to current page buffer, flushing to disk if page becomes full. */
+  /** Write entry to current page buffer, handling spanning entries across multiple pages. */
   private void writeEntry(WALEntry entry) throws IOException, WALException {
     byte[] serializedEntry = serializeEntry(entry);
     int entrySize = serializedEntry.length;
@@ -292,28 +292,38 @@ public class FileBasedWAL implements WriteAheadLog {
         entrySize,
         currentPageBuffer.remaining());
 
-    // Record spanning not yet implemented
-    // Check if entry is too large for a page and if yes, throw exception
-    if (entrySize + ENTRY_HEADER_SIZE > PAGE_DATA_SIZE) {
-      logger.error("Entry too large: {} bytes, max: {} bytes", entrySize, PAGE_DATA_SIZE);
-      throw new WALException(
-          "Entry too large: " + entrySize + " bytes, max: " + PAGE_DATA_SIZE + " bytes");
+    // Check if entry fits in current page
+    if (currentPageBuffer.remaining() >= entrySize) {
+      // Entry fits in current page - simple case
+      writeEntryToCurrentPage(entry, serializedEntry);
+    } else if (entrySize <= PAGE_DATA_SIZE) {
+      // Entry doesn't fit in current page but fits in a single page
+      // Flush current page and write to new page
+      if (currentPageBuffer.position() > WALPageHeader.HEADER_SIZE) {
+        logger.debug("Flushing current page to make room for entry that fits in single page");
+        flushCurrentPage();
+        initializeNewPage();
+      }
+      writeEntryToCurrentPage(entry, serializedEntry);
+    } else {
+      // Entry is too large for a single page - needs spanning
+      // First, flush current page if it has any data
+      if (currentPageBuffer.position() > WALPageHeader.HEADER_SIZE) {
+        logger.debug("Flushing current page before starting spanning entry");
+        flushCurrentPage();
+        initializeNewPage();
+      }
+
+      // Now write the spanning entry starting from a clean page
+      writeSpanningEntry(entry, serializedEntry);
     }
 
-    // Record spanning not yet implemented
-    // Check if entry fits in current page, if not flush current page and start a new one
-    // Entries bigger than the whole page are handled above so at this point we already know that
-    // the entry will fit into a page
-    if (currentPageBuffer.remaining() < entrySize + ENTRY_HEADER_SIZE) {
-      logger.debug(
-          "Page full, flushing current page (entries={}, remaining={} bytes)",
-          currentPageEntryCount,
-          currentPageBuffer.remaining());
-      // Flush current page and start new one
-      flushCurrentPage();
-      initializeNewPage();
-    }
+    logger.debug("Entry written: seq={}, totalSize={} bytes", entry.getSequenceNumber(), entrySize);
+  }
 
+  /** Write entry that fits in current page. */
+  private void writeEntryToCurrentPage(WALEntry entry, byte[] serializedEntry)
+      throws IOException, WALException {
     // Add entry to page buffer
     currentPageBuffer.put(serializedEntry);
 
@@ -327,26 +337,77 @@ public class FileBasedWAL implements WriteAheadLog {
     currentPageLastTimestamp = entry.getTimestamp();
     currentPageEntryCount++;
 
-    // Flush current page when remaining space is less than an entry header - meaning current page
-    // cannot take any more entries
+    // Flush current page when remaining space is less than an entry header
     if (currentPageBuffer.remaining() < ENTRY_HEADER_SIZE) {
       logger.debug(
           "Page full, flushing current page (entries={}, remaining={} bytes)",
           currentPageEntryCount,
           currentPageBuffer.remaining());
-      // Flush current page and start new one
       flushCurrentPage();
       initializeNewPage();
     }
+  }
 
+  /** Write entry that spans multiple pages. */
+  private void writeSpanningEntry(WALEntry entry, byte[] serializedEntry)
+      throws IOException, WALException {
     logger.debug(
-        "Entry added to page: entryCount={}, pageUsed={} bytes",
-        currentPageEntryCount,
-        currentPageBuffer.position());
+        "Writing spanning entry: seq={}, totalSize={} bytes",
+        entry.getSequenceNumber(),
+        serializedEntry.length);
+
+    int bytesWritten = 0;
+    int totalBytes = serializedEntry.length;
+    boolean isFirstPage = true;
+
+    while (bytesWritten < totalBytes) {
+      int availableSpace = currentPageBuffer.remaining();
+      int bytesToWrite = Math.min(availableSpace, totalBytes - bytesWritten);
+
+      // Write data chunk to current page
+      currentPageBuffer.put(serializedEntry, bytesWritten, bytesToWrite);
+      bytesWritten += bytesToWrite;
+
+      // Update page metadata for spanning entry
+      if (currentPageFirstSequence == -1) {
+        currentPageFirstSequence = entry.getSequenceNumber();
+        currentPageFirstTimestamp = entry.getTimestamp();
+      }
+      currentPageLastSequence = entry.getSequenceNumber();
+      currentPageLastTimestamp = entry.getTimestamp();
+
+      // Determine continuation flags and entry count
+      short continuationFlags;
+      if (isFirstPage) {
+        continuationFlags =
+            (bytesWritten >= totalBytes) ? WALPageHeader.NO_CONTINUATION : WALPageHeader.FIRST_PART;
+        currentPageEntryCount = 1; // Only first page counts the entry
+        isFirstPage = false;
+      } else if (bytesWritten >= totalBytes) {
+        continuationFlags = WALPageHeader.LAST_PART;
+        currentPageEntryCount = 0; // Continuation pages don't count entries
+      } else {
+        continuationFlags = WALPageHeader.MIDDLE_PART;
+        currentPageEntryCount = 0; // Continuation pages don't count entries
+      }
+
+      // Flush current page with appropriate continuation flags
+      flushCurrentPageWithFlags(continuationFlags);
+
+      // Start new page if more data to write
+      if (bytesWritten < totalBytes) {
+        initializeNewPage();
+      }
+    }
   }
 
   /** Flush current page buffer to disk with proper header. */
   private void flushCurrentPage() throws IOException, WALException {
+    flushCurrentPageWithFlags(WALPageHeader.NO_CONTINUATION);
+  }
+
+  /** Flush current page buffer to disk with specified continuation flags. */
+  private void flushCurrentPageWithFlags(short continuationFlags) throws IOException, WALException {
     if (currentPageBuffer == null || currentPageBuffer.position() <= WALPageHeader.HEADER_SIZE) {
       logger.debug("No data to flush in current page");
       return; // No data to flush
@@ -360,14 +421,15 @@ public class FileBasedWAL implements WriteAheadLog {
         new WALPageHeader(
             currentPageFirstSequence, currentPageLastSequence,
             firstTs, lastTs,
-            currentPageEntryCount, WALPageHeader.NO_CONTINUATION);
+            currentPageEntryCount, continuationFlags);
 
     logger.debug(
-        "Flushing page to disk: seq={}-{}, entries={}, dataSize={} bytes",
+        "Flushing page to disk: seq={}-{}, entries={}, dataSize={} bytes, flags={}",
         currentPageFirstSequence,
         currentPageLastSequence,
         currentPageEntryCount,
-        currentPageBuffer.position() - WALPageHeader.HEADER_SIZE);
+        currentPageBuffer.position() - WALPageHeader.HEADER_SIZE,
+        continuationFlags);
 
     // Write header at beginning of buffer
     byte[] headerBytes = header.serialize();
@@ -385,13 +447,16 @@ public class FileBasedWAL implements WriteAheadLog {
         filePositionAfter,
         currentFile.length());
 
-    // Check if we need to rotate file
-    if (currentFile.length() >= maxFileSize) {
-      logger.debug(
-          "File size limit reached: {} >= {}, triggering rotation",
-          currentFile.length(),
-          maxFileSize);
-      rotateFile();
+    // Check if we need to rotate file (only if not in middle of spanning entry)
+    if (continuationFlags == WALPageHeader.NO_CONTINUATION
+        || continuationFlags == WALPageHeader.LAST_PART) {
+      if (currentFile.length() >= maxFileSize) {
+        logger.debug(
+            "File size limit reached: {} >= {}, triggering rotation",
+            currentFile.length(),
+            maxFileSize);
+        rotateFile();
+      }
     }
   }
 
@@ -553,73 +618,6 @@ public class FileBasedWAL implements WriteAheadLog {
     }
   }
 
-  private List<WALEntry> readEntriesFromFileBySequence(Path walFile, long fromSeq, long toSeq)
-      throws IOException, WALException {
-    List<WALEntry> entries = new ArrayList<>();
-
-    logger.debug(
-        "Reading entries from file: {} (range: {}-{})", walFile.getFileName(), fromSeq, toSeq);
-
-    try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
-      long fileSize = file.length();
-      long currentPos = 0;
-      int pagesRead = 0;
-
-      logger.debug("File size: {} bytes, expected pages: {}", fileSize, fileSize / PAGE_SIZE);
-
-      // Read all pages in file
-      while (currentPos + WALPageHeader.HEADER_SIZE <= fileSize) {
-        file.seek(currentPos);
-
-        // Read page header
-        byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-        file.readFully(headerData);
-
-        try {
-          WALPageHeader header = WALPageHeader.deserialize(headerData);
-
-          logger.debug(
-              "Page at offset {}: seq={}-{}, entries={}",
-              currentPos,
-              header.getFirstSequence(),
-              header.getLastSequence(),
-              header.getEntryCount());
-
-          // Skip non-overlapping pages
-          if (header.getLastSequence() < fromSeq || header.getFirstSequence() > toSeq) {
-            logger.debug("Skipping non-overlapping page at offset {}", currentPos);
-            currentPos += PAGE_SIZE;
-            continue;
-          }
-
-          // Read entries from overlapping page
-          long pageEnd = Math.min(currentPos + PAGE_SIZE, fileSize);
-          long dataSize = pageEnd - currentPos - WALPageHeader.HEADER_SIZE;
-
-          List<WALEntry> pageEntries =
-              readEntriesFromPage(
-                  file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromSeq, toSeq);
-          entries.addAll(pageEntries);
-          pagesRead++;
-
-          logger.debug("Read {} entries from page at offset {}", pageEntries.size(), currentPos);
-
-        } catch (WALException e) {
-          // Re-throw corruption errors instead of skipping
-          throw new WALException(
-              "Corrupted page at offset " + currentPos + ": " + e.getMessage(), e);
-        }
-
-        currentPos += PAGE_SIZE;
-      }
-
-      logger.debug(
-          "File processing completed: {} entries from {} pages", entries.size(), pagesRead);
-    }
-
-    return entries;
-  }
-
   private void emitEntriesFromFileBySequence(
       FluxSink<WALEntry> sink, Path walFile, long fromSeq, long toSeq) throws IOException {
     logger.debug(
@@ -628,6 +626,10 @@ public class FileBasedWAL implements WriteAheadLog {
     try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
       long fileSize = file.length();
       long currentPos = 0;
+
+      // State for spanning entry reconstruction
+      ByteArrayOutputStream spanningEntryData = null;
+      long spanningEntrySequence = -1;
 
       while (currentPos + WALPageHeader.HEADER_SIZE <= fileSize && !sink.isCancelled()) {
         file.seek(currentPos);
@@ -638,7 +640,9 @@ public class FileBasedWAL implements WriteAheadLog {
         try {
           WALPageHeader header = WALPageHeader.deserialize(headerData);
 
-          if (header.getLastSequence() < fromSeq || header.getFirstSequence() > toSeq) {
+          // Skip non-overlapping pages (but not if we're in middle of spanning entry)
+          if (spanningEntryData == null
+              && (header.getLastSequence() < fromSeq || header.getFirstSequence() > toSeq)) {
             currentPos += PAGE_SIZE;
             continue;
           }
@@ -646,8 +650,39 @@ public class FileBasedWAL implements WriteAheadLog {
           long pageEnd = Math.min(currentPos + PAGE_SIZE, fileSize);
           long dataSize = pageEnd - currentPos - WALPageHeader.HEADER_SIZE;
 
-          emitEntriesFromPage(
-              sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromSeq, toSeq);
+          if (header.isSpanningRecord()) {
+            // Handle spanning entry
+            if (header.isFirstPart()) {
+              // Start new spanning entry
+              spanningEntryData = new ByteArrayOutputStream();
+              spanningEntrySequence = header.getFirstSequence();
+            }
+
+            if (spanningEntryData != null) {
+              // Read page data
+              byte[] pageData = new byte[(int) dataSize];
+              file.seek(currentPos + WALPageHeader.HEADER_SIZE);
+              file.readFully(pageData);
+              spanningEntryData.write(pageData);
+
+              if (header.isLastPart()) {
+                // Complete spanning entry
+                byte[] completeEntryData = spanningEntryData.toByteArray();
+                WALEntry entry = WALEntry.deserialize(completeEntryData);
+
+                if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
+                  sink.next(entry);
+                }
+
+                spanningEntryData = null;
+                spanningEntrySequence = -1;
+              }
+            }
+          } else {
+            // Handle regular page with complete entries
+            emitEntriesFromPage(
+                sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromSeq, toSeq);
+          }
 
         } catch (WALException e) {
           sink.error(
@@ -659,51 +694,6 @@ public class FileBasedWAL implements WriteAheadLog {
         currentPos += PAGE_SIZE;
       }
     }
-  }
-
-  private List<WALEntry> readEntriesFromPage(
-      RandomAccessFile file, long startOffset, long dataSize, long fromSeq, long toSeq)
-      throws IOException, WALException {
-    List<WALEntry> entries = new ArrayList<>();
-    file.seek(startOffset);
-
-    long currentPos = startOffset;
-    long endPos = startOffset + dataSize;
-
-    while (currentPos < endPos && currentPos < file.length()) {
-      if (endPos - currentPos < ENTRY_HEADER_SIZE) break;
-
-      // Read entry header to get size
-      long entryStart = file.getFilePointer();
-      byte entryType = file.readByte();
-      if (entryType == 0) break; // Padding
-
-      file.readLong(); // sequence
-      file.readLong(); // timestamp
-      int dataLength = file.readInt();
-
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
-        break; // Invalid entry
-      }
-
-      // Read complete entry data
-      int totalEntrySize = ENTRY_HEADER_SIZE + dataLength;
-      byte[] entryData = new byte[totalEntrySize];
-      file.seek(entryStart);
-      file.readFully(entryData);
-
-      // Deserialize with CRC32 validation
-      WALEntry entry = WALEntry.deserialize(entryData);
-
-      // Filter by sequence range
-      if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
-        entries.add(entry);
-      }
-
-      currentPos = file.getFilePointer();
-    }
-
-    return entries;
   }
 
   private void emitEntriesFromPage(
@@ -740,12 +730,25 @@ public class FileBasedWAL implements WriteAheadLog {
       file.seek(entryStart);
       file.readFully(entryData);
 
-      // Deserialize with CRC32 validation - let exceptions propagate
-      WALEntry entry = WALEntry.deserialize(entryData);
+      try {
+        // Deserialize with CRC32 validation
+        WALEntry entry = WALEntry.deserialize(entryData);
 
-      // Filter by sequence range
-      if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
-        sink.next(entry);
+        // Filter by sequence range
+        if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
+          sink.next(entry);
+        }
+      } catch (WALException e) {
+        // Let CRC32 validation errors propagate, but log other deserialization issues
+        if (e.getMessage().contains("CRC32")) {
+          throw e; // Propagate CRC32 validation errors
+        } else {
+          // Skip entries that fail deserialization for other reasons
+          logger.debug(
+              "Skipping entry that failed deserialization at position {}: {}",
+              entryStart,
+              e.getMessage());
+        }
       }
 
       currentPos = file.getFilePointer();
@@ -860,6 +863,10 @@ public class FileBasedWAL implements WriteAheadLog {
       long fileSize = file.length();
       long currentPos = 0;
 
+      // State for spanning entry reconstruction
+      ByteArrayOutputStream spanningEntryData = null;
+      long spanningEntrySequence = -1;
+
       while (currentPos + WALPageHeader.HEADER_SIZE <= fileSize && !sink.isCancelled()) {
         file.seek(currentPos);
 
@@ -869,8 +876,10 @@ public class FileBasedWAL implements WriteAheadLog {
         try {
           WALPageHeader header = WALPageHeader.deserialize(headerData);
 
-          if (header.getLastTimestamp().isBefore(fromTs)
-              || header.getFirstTimestamp().isAfter(toTs)) {
+          // Skip non-overlapping pages (but not if we're in middle of spanning entry)
+          if (spanningEntryData == null
+              && (header.getLastTimestamp().isBefore(fromTs)
+                  || header.getFirstTimestamp().isAfter(toTs))) {
             currentPos += PAGE_SIZE;
             continue;
           }
@@ -878,8 +887,40 @@ public class FileBasedWAL implements WriteAheadLog {
           long pageEnd = Math.min(currentPos + PAGE_SIZE, fileSize);
           long dataSize = pageEnd - currentPos - WALPageHeader.HEADER_SIZE;
 
-          emitEntriesFromPageByTimestamp(
-              sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromTs, toTs);
+          if (header.isSpanningRecord()) {
+            // Handle spanning entry
+            if (header.isFirstPart()) {
+              // Start new spanning entry
+              spanningEntryData = new ByteArrayOutputStream();
+              spanningEntrySequence = header.getFirstSequence();
+            }
+
+            if (spanningEntryData != null) {
+              // Read page data
+              byte[] pageData = new byte[(int) dataSize];
+              file.seek(currentPos + WALPageHeader.HEADER_SIZE);
+              file.readFully(pageData);
+              spanningEntryData.write(pageData);
+
+              if (header.isLastPart()) {
+                // Complete spanning entry
+                byte[] completeEntryData = spanningEntryData.toByteArray();
+                WALEntry entry = WALEntry.deserialize(completeEntryData);
+
+                // Filter by timestamp range
+                if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
+                  sink.next(entry);
+                }
+
+                spanningEntryData = null;
+                spanningEntrySequence = -1;
+              }
+            }
+          } else {
+            // Handle regular page with complete entries
+            emitEntriesFromPageByTimestamp(
+                sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromTs, toTs);
+          }
 
         } catch (WALException e) {
           throw new WALException(
@@ -925,12 +966,25 @@ public class FileBasedWAL implements WriteAheadLog {
       file.seek(entryStart);
       file.readFully(entryData);
 
-      // Deserialize with CRC32 validation - let exceptions propagate
-      WALEntry entry = WALEntry.deserialize(entryData);
+      try {
+        // Deserialize with CRC32 validation
+        WALEntry entry = WALEntry.deserialize(entryData);
 
-      // Filter by timestamp range
-      if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
-        sink.next(entry);
+        // Filter by timestamp range
+        if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
+          sink.next(entry);
+        }
+      } catch (WALException e) {
+        // Let CRC32 validation errors propagate, but log other deserialization issues
+        if (e.getMessage().contains("CRC32")) {
+          throw e; // Propagate CRC32 validation errors
+        } else {
+          // Skip entries that fail deserialization for other reasons
+          logger.debug(
+              "Skipping entry that failed deserialization at position {}: {}",
+              file.getFilePointer() - totalEntrySize,
+              e.getMessage());
+        }
       }
 
       currentPos = file.getFilePointer();
