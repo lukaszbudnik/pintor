@@ -38,16 +38,29 @@ Build and test:
 ### Basic Entry Creation
 
 ```java
-try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
+try (WriteAheadLog wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
     ByteBuffer data = ByteBuffer.wrap("INSERT|txn_1001|users|1|{\"name\":\"John\"}".getBytes());
     WALEntry entry = wal.createAndAppend(data);
+}
+```
+
+### Large Entry Handling
+
+Pintor seamlessly handles entries of any size, automatically spanning them across multiple pages when needed:
+
+```java
+try (WriteAheadLog wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
+    // Large entry that will span multiple pages
+    String largeData = "x".repeat(10000); // 10KB entry
+    ByteBuffer data = ByteBuffer.wrap(largeData.getBytes());
+    WALEntry entry = wal.createAndAppend(data); // Automatically handles spanning
 }
 ```
 
 ### Batch Operations
 
 ```java
-try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
+try (WriteAheadLog wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
     List<ByteBuffer> batch = Arrays.asList(
         ByteBuffer.wrap("BEGIN|txn_2001|".getBytes()),
         ByteBuffer.wrap("INSERT|txn_2001|products|1|{\"name\":\"Laptop\"}".getBytes()),
@@ -59,7 +72,7 @@ try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
 ### Reading
 
 ```java
-try (FileBasedWAL wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
+try (WriteAheadLog wal = new FileBasedWAL(Paths.get("/path/to/wal"))) {
     // Read from sequence
     List<WALEntry> entries = wal.readFrom(0L);
     
@@ -83,13 +96,13 @@ The WAL automatically recovers the last sequence number and entry count when reo
 
 ```java
 // First session
-try (FileBasedWAL wal = new FileBasedWAL(walDir)) {
+try (WriteAheadLog wal = new FileBasedWAL(walDir)) {
     WALEntry entry = wal.createAndAppend(ByteBuffer.wrap("data".getBytes()));
     // Application crashes here
 }
 
 // Second session - automatic recovery
-try (FileBasedWAL wal = new FileBasedWAL(walDir)) {
+try (WriteAheadLog wal = new FileBasedWAL(walDir)) {
     // Automatically recovers last sequence number
     long lastSeq = wal.getCurrentSequenceNumber();
     // Continue operations with proper sequence number continuation
@@ -109,7 +122,7 @@ try (FileBasedWAL wal = new FileBasedWAL(walDir)) {
 
 ### Storage Format
 
-**WAL Log Files: `wal-{index}.log`**
+#### WAL Log Files: `wal-{index}.log`
 
 A WAL file, such as `wal-0.log`, is a collection of fixed-size 4KB pages. The file grows as new data is written, and a new file is created (rotated) when the size limit is reached (default: 64MB).
 
@@ -127,9 +140,9 @@ A WAL file, such as `wal-0.log`, is a collection of fixed-size 4KB pages. The fi
 +----------------------+
 ```
 
-**Page Structure (4096 bytes):**
+#### Page Structure
 
-Each 4KB page consists of a fixed-size header and a data section that contains the WAL entries.
+Each page consists of a fixed-size header and a data section that contains the WAL entries.
 
 ```
 +------------------------------------------------+
@@ -171,7 +184,7 @@ Each 4KB page consists of a fixed-size header and a data section that contains t
   - Page is flushed before completely full by either manual sync or read operations (for more see: [Page Flushing to Disk](#page-flushing-to-disk))
   - Next entry is too large to fit in remaining space
 
-**WAL Entry Format**
+#### WAL Entry Structure
 
 Entries are stored sequentially in the data section of a page. An entry is composed of a fixed-size header and a variable-length data payload.
 
@@ -207,38 +220,86 @@ Pages and WAL entries are buffered in memory and written to disk when any of the
 
 ### Record Spanning Examples
 
-Multiple Small Entries (fit in one page):
+**Page Structure**: Each page is 4096 bytes with a 44-byte header, leaving 4052 bytes for data. Each entry has 25-byte header and a variable length data.
+
+**Multiple Small Entries (fit in one page):**
 
 ```
-Page 1: [Header: flags=0, seq=101-103][Entry seq=101][Entry seq=102][Entry seq=103][Free space]
+Page 1 (4096 bytes): [Header: 44 bytes, flags=0, seq=101-103]
+  Entry 101: 175 bytes (25 byte header + 150 byte data)
+  Entry 102: 175 bytes (25 byte header + 150 byte data)
+  Entry 103: 175 bytes (25 byte header + 150 byte data)
+  Total used: 44 + 525 = 569 bytes, Free space: 3,527 bytes
 ```
 
-Large Entry (spans 3 pages):
-
-⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
+**Large Entry Spanning with Mixed Content (10KB entry):**
 
 ```
-Page 1: [Header: flags=FIRST_PART, seq=100-100][Entry header + 4KB data][No free space]
-Page 2: [Header: flags=MIDDLE_PART, seq=100-100][4KB continuation data][No free space]  
-Page 3: [Header: flags=LAST_PART, seq=100-100][2KB final data][Free space]
+Entry 203: 10,225 byte data
+
+Page 1 (4096 bytes): [Header: 44 bytes, flags=FIRST_PART, seq=200-203]
+  Entry 200: 175 bytes (complete entry)
+  Entry 201: 175 bytes (complete entry)
+  Entry 202: 175 bytes (complete entry)
+  Entry 203: 3,527 bytes (25 byte header + 3,502 bytes of data)
+  Total used: 44 + 525 + 3,527 = 4,096 bytes, Free space: 0 bytes
+
+Entry 203 remaining bytes to write: 6,723 bytes
+
+Page 2 (4096 bytes): [Header: 44 bytes, flags=MIDDLE_PART, seq=203-203]
+  Entry 203 continuation: 4,052 bytes (25 byte header + 4,027 bytes of data)
+  Total used: 44 + 4,052 = 4,096 bytes, Free space: 0 bytes
+
+Remaining entry 203 to write: 2,696 bytes
+
+Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=203-207]
+  Entry 203 final data: 2,721 bytes (25 byte header + 2,696 bytes of data)
+  Entry 204: 200 bytes (complete entry)
+  Entry 205: 200 bytes (complete entry)
+  Entry 206: 200 bytes (complete entry)
+  Entry 207: 200 bytes (complete entry)
+  Total used: 44 + 2,721 + 800 = 3,565, Free space: 531 bytes
 ```
 
-Mixed Page (small entry + large entry + small entry):
-
-⚠️ Large entry is not yet implemented. Currently, Pintor throws an exception if an entry is too large to fit in a single page.
+**Entry Spanning Single Page (FIRST_PART | LAST_PART):**
 
 ```
-Page 1: [Header: flags=FIRST_PART, seq=200-201][Entry seq=200 (1KB)][Entry seq=201 header + 3KB data][No free space]
-Page 2: [Header: flags=MIDDLE_PART, seq=201-201][4KB continuation data for seq=201][No free space]
-Page 3: [Header: flags=LAST_PART, seq=201-202][1KB final data for seq=201][Entry seq=202][Free space]
+Entry 304: 4,096 byte data
+Entry 305: 3,456 byte data
+
+Page 1 (4096 bytes): [Header: 44 bytes, flags=FIRST_PART, seq=300-304]
+  Entry 300: 200 bytes (complete entry)
+  Entry 301: 200 bytes (complete entry)
+  Entry 302: 200 bytes (complete entry)
+  Entry 303: 200 bytes (complete entry)
+  Entry 304: 3,252 bytes (FIRST_PART, 25 byte header + 3,227 bytes of data)
+  Total used: 44 + 800 + 3,252 = 4,096, Free space: 0 bytes
+
+Entry 304 remaining bytes to write: 869 bytes
+
+Page 2 (4096 bytes): [Header: 44 bytes, flags=FIRST_PART | LAST_PART, seq=304-305]
+  Entry 304: 894 bytes (LAST_PART, 25 byte header + 869 bytes of data)
+  Entry 305: 3,158 bytes (FIRST_PART, 25 byte header + 3,133 bytes of data)
+  Total used: 44 + 894 + 3,158 = 4,096, Free space: 0 bytes
+
+Entry 305 remaining bytes to write: 323 bytes
+
+Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=305-305]
+  Entry 305: 348 bytes (LAST_PART, 25 byte header + 323)
+  Total used: 44 + 348 = 392, Free space: 3,705 bytes
 ```
 
 **Key Rules:**
 - Every page always has a 44-byte header
-- Continuation flags in header indicate spanning record parts
-- Spanning records share the same sequence number across all pages
-- First/Last sequence in header reflects actual entry sequences in that page
-- Middle pages contain only continuation data, no new entry headers
+- Every entry always has a 25-byte header
+- Continuation flags indicate spanning record parts: FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
+- Multiple complete entries can coexist with spanning entry parts in the same page
+- When FIRST_PART flag is set with multiple entries, only the last entry in sequence range is spanning
+- When LAST_PART flag is set with multiple entries, only the first entry in sequence range is spanning
+- FIRST_PART | LAST_PART combination indicates both spanning parts exist in the same page
+- First/Last sequence in header reflects all entry sequences present in that page
+- **Spanning entries are always written to the same WAL file** - a logical entry is never split across multiple WAL files
+- **WAL files can exceed the configured `maxFileSize`** to accommodate complete spanning entries. Entry atomicity takes precedence over file size limits. This ensures data consistency and simplifies recovery logic at the cost of potentially larger files.
 
 ### Recovery Process:
 1. Seek to last page boundary in newest file
