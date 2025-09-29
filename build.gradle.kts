@@ -1,7 +1,7 @@
 plugins {
     id("java")
     id("jacoco")
-    id("com.diffplug.spotless") version "7.2.1"
+    id("com.diffplug.spotless") version "8.0.0"
 }
 
 group = "com.github.lukaszbudnik"
