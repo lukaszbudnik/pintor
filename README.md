@@ -337,6 +337,36 @@ Pintor is lightweight with minimal external dependencies, relying only on:
 - `long size()`: Get entry count.
 - `boolean isEmpty()`: Check if WAL is empty.
 
+### WALMetrics
+
+WALMetrics provides comprehensive operational statistics for monitoring and performance analysis:
+
+```java
+WALMetrics metrics = wal.getMetrics();
+
+// Write metrics
+long entriesWritten = metrics.getEntriesWritten();
+long bytesWritten = metrics.getBytesWritten();
+long pagesWritten = metrics.getPagesWritten();
+long filesCreated = metrics.getFilesCreated();
+
+// Read metrics
+long entriesRead = metrics.getEntriesRead();
+long pagesRead = metrics.getPagesRead();
+long rangeQueries = metrics.getRangeQueries();
+
+// I/O efficiency metrics
+long filesScanned = metrics.getFilesScanned();
+long pagesScanned = metrics.getPagesScanned();
+```
+
+**Key Metrics:**
+- **Write Operations**: Track entries written, total bytes, pages written, and file creation
+- **Read Operations**: Monitor entries read, pages read, and query patterns
+- **I/O Efficiency**: Measure files and pages scanned for performance optimization
+- **Thread-Safe**: All counters use atomic operations for concurrent access
+- **Cumulative**: Metrics accumulate across the lifetime of the WAL instance
+
 ### Configuration
 
 ```java
