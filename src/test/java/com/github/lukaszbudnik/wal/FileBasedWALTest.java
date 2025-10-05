@@ -7,7 +7,9 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -397,47 +399,6 @@ class FileBasedWALTest {
     emptyWal.close();
   }
 
-  //  @Test
-  //  void testLargeDataHandling() throws WALException {
-  //    // Test with 1MB data
-  //    byte[] largeData = new byte[1024 * 1024];
-  //    Arrays.fill(largeData, (byte) 'A');
-  //
-  //    WALEntry largeEntry = wal.createAndAppend(ByteBuffer.wrap(largeData));
-  //
-  //    // Test with structured large data
-  //    StringBuilder structuredLargeData = new StringBuilder();
-  //    structuredLargeData.append("INSERT|txn_large|huge_table|1|");
-  //    for (int i = 0; i < 10000; i++) {
-  //      structuredLargeData.append("field").append(i).append(":value").append(i).append(",");
-  //    }
-  //
-  //    WALEntry structuredEntry =
-  //        wal.createAndAppend(ByteBuffer.wrap(structuredLargeData.toString().getBytes()));
-  //
-  //    wal.sync();
-  //
-  //    // Verify both large entries can be read back correctly
-  //    List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
-  //    assertEquals(2, entries.size());
-  //
-  //    // Verify large binary data
-  //    assertArrayEquals(largeData, entries.get(0).getDataAsBytes());
-  //
-  //    // Verify structured large data
-  //    String retrievedStructured = new String(entries.get(1).getDataAsBytes());
-  //    assertEquals(structuredLargeData.toString(), retrievedStructured);
-  //
-  //    // Verify we can parse the structured data
-  //    String[] parts = retrievedStructured.split("\\|", 5);
-  //    assertEquals("INSERT", parts[0]);
-  //    assertEquals("txn_large", parts[1]);
-  //    assertEquals("huge_table", parts[2]);
-  //    assertEquals("1", parts[3]);
-  //    assertTrue(parts[4].startsWith("field0:value0,"));
-  //    assertTrue(parts[4].contains("field9999:value9999,"));
-  //  }
-
   @Test
   void testErrorHandling() throws Exception {
     wal.close();
@@ -715,5 +676,183 @@ class FileBasedWALTest {
 
     // Test cancellation
     StepVerifier.create(wal.readFrom(0L)).expectNextCount(3).thenCancel().verify();
+  }
+
+  @Test
+  void testPageFlushingEdgeCase() throws WALException {
+    // Recreate the exact scenario: page with exactly 0 bytes remaining
+    // Page data size: 4052 bytes
+    // Entry structure: 1 byte type + 8 bytes seq + 8 bytes timestamp + 4 bytes length + data + 4
+    // bytes CRC = 25 + data
+    // Need 41-byte entries (16 bytes data + 25 bytes overhead)
+    // 4052 / 41 = 98.8, so 98 entries = 4018 bytes, leaving 34 bytes
+    // Need to adjust to get exactly 0 bytes remaining
+
+    List<WALEntry> entries = new ArrayList<>();
+
+    // Fill page to exactly 41 bytes remaining (space for exactly 1 more 41-byte entry)
+    // We need 4052 - 41 = 4011 bytes used
+    // Use 97 entries of 41 bytes = 3977 bytes, then 1 entry of 34 bytes = 4011 bytes total
+    for (int i = 0; i < 97; i++) {
+      String data = String.format("data%012d", i); // 16 bytes
+      WALEntry entry = wal.createAndAppend(ByteBuffer.wrap(data.getBytes()));
+      entries.add(entry);
+    }
+
+    // Add one smaller entry to get exactly 41 bytes remaining
+    String smallData = String.format("d%08d", 97); // 9 bytes (34 total bytes)
+    WALEntry smallEntry = wal.createAndAppend(ByteBuffer.wrap(smallData.getBytes()));
+    entries.add(smallEntry);
+
+    // Now add the critical entry that should exactly fill the page (41 bytes remaining, need 41
+    // bytes)
+    // This should trigger "Page full, flushing current page (entries=98, remaining=0 bytes)"
+    String data97 = String.format("data%012d", 98); // 16 bytes (41 total bytes)
+    WALEntry entry97 = wal.createAndAppend(ByteBuffer.wrap(data97.getBytes()));
+    entries.add(entry97);
+
+    // Add one more entry that should go to new page
+    String data98 = String.format("data%012d", 99); // 16 bytes
+    WALEntry entry98 = wal.createAndAppend(ByteBuffer.wrap(data98.getBytes()));
+    entries.add(entry98);
+
+    wal.sync();
+
+    // Read all entries back and verify no duplicates and correct sequence
+    List<WALEntry> readEntries = Flux.from(wal.readFrom(0L)).collectList().block();
+
+    assertEquals(100, readEntries.size(), "Should have exactly 100 entries");
+
+    // Verify sequence numbers are consecutive and no duplicates
+    Set<Long> sequenceNumbers = new HashSet<>();
+    for (int i = 0; i < readEntries.size(); i++) {
+      WALEntry entry = readEntries.get(i);
+      assertEquals(i, entry.getSequenceNumber(), "Sequence number should be consecutive");
+      assertTrue(
+          sequenceNumbers.add(entry.getSequenceNumber()),
+          "Duplicate sequence number found: " + entry.getSequenceNumber());
+    }
+
+    // Specifically verify the critical entries around the page boundary
+    assertEquals(97, readEntries.get(97).getSequenceNumber());
+    assertEquals(98, readEntries.get(98).getSequenceNumber());
+    assertEquals(99, readEntries.get(99).getSequenceNumber());
+  }
+
+  @Test
+  void testExactPageSizeEntry() throws WALException {
+    // Create an entry that exactly fills the entire page data section
+    // Page data size: 4052 bytes
+    // Entry overhead: 25 bytes (1+8+8+4+4)
+    // So data should be: 4052 - 25 = 4027 bytes
+
+    byte[] exactPageData = new byte[4027];
+    for (int i = 0; i < exactPageData.length; i++) {
+      exactPageData[i] = (byte) (i % 256);
+    }
+
+    WALEntry entry = wal.createAndAppend(ByteBuffer.wrap(exactPageData));
+    assertEquals(0, entry.getSequenceNumber());
+
+    wal.sync();
+
+    // Read back and verify
+    List<WALEntry> readEntries = Flux.from(wal.readFrom(0L)).collectList().block();
+    assertEquals(1, readEntries.size());
+    assertEquals(0, readEntries.get(0).getSequenceNumber());
+
+    // Verify data integrity
+    byte[] readData = readEntries.get(0).getDataAsBytes();
+    assertEquals(4027, readData.length);
+    for (int i = 0; i < readData.length; i++) {
+      assertEquals((byte) (i % 256), readData[i], "Data mismatch at position " + i);
+    }
+  }
+
+  @Test
+  void testExactPageSizeEntryByTimestamp() throws WALException, java.io.IOException {
+    // Create an entry that exactly fills the entire page data section
+    // Page data size: 4052 bytes
+    // Entry overhead: 25 bytes (1+8+8+4+4)
+    // So data should be: 4052 - 25 = 4027 bytes
+
+    byte[] exactPageData = new byte[4027];
+    for (int i = 0; i < exactPageData.length; i++) {
+      exactPageData[i] = (byte) (i % 256);
+    }
+
+    // Use wider timestamp range to ensure we capture the entry
+    Instant beforeWrite = Instant.now().minusSeconds(1);
+    WALEntry entry = wal.createAndAppend(ByteBuffer.wrap(exactPageData));
+    Instant afterWrite = Instant.now().plusSeconds(1);
+    assertEquals(0, entry.getSequenceNumber());
+
+    wal.sync();
+
+    // Read back by timestamp range
+    List<WALEntry> readEntries =
+        Flux.from(wal.readRange(beforeWrite, afterWrite)).collectList().block();
+    assertEquals(1, readEntries.size());
+    assertEquals(0, readEntries.get(0).getSequenceNumber());
+
+    // Verify data integrity
+    byte[] readData = readEntries.get(0).getDataAsBytes();
+    assertEquals(4027, readData.length);
+    for (int i = 0; i < readData.length; i++) {
+      assertEquals((byte) (i % 256), readData[i], "Data mismatch at position " + i);
+    }
+  }
+
+  @Test
+  void testPageFlushingEdgeCaseByTimestamp() throws WALException {
+    List<WALEntry> entries = new ArrayList<>();
+    // Use wider timestamp range to ensure we capture all entries
+    Instant beforeWrite = Instant.now().minusSeconds(1);
+
+    // Fill page to exactly 41 bytes remaining (space for exactly 1 more 41-byte entry)
+    for (int i = 0; i < 97; i++) {
+      String data = String.format("data%012d", i); // 16 bytes
+      WALEntry entry = wal.createAndAppend(ByteBuffer.wrap(data.getBytes()));
+      entries.add(entry);
+    }
+
+    // Add one smaller entry to get exactly 41 bytes remaining
+    String smallData = String.format("d%08d", 97); // 9 bytes (34 total bytes)
+    WALEntry smallEntry = wal.createAndAppend(ByteBuffer.wrap(smallData.getBytes()));
+    entries.add(smallEntry);
+
+    // Now add the critical entry that should exactly fill the page
+    String data97 = String.format("data%012d", 98); // 16 bytes (41 total bytes)
+    WALEntry entry97 = wal.createAndAppend(ByteBuffer.wrap(data97.getBytes()));
+    entries.add(entry97);
+
+    // Add one more entry that should go to new page
+    String data98 = String.format("data%012d", 99); // 16 bytes
+    WALEntry entry98 = wal.createAndAppend(ByteBuffer.wrap(data98.getBytes()));
+    entries.add(entry98);
+
+    Instant afterWrite = Instant.now().plusSeconds(1);
+    wal.sync();
+
+    // Read all entries back by timestamp and verify no duplicates and correct sequence
+    List<WALEntry> readEntries =
+        Flux.from(wal.readRange(beforeWrite, afterWrite)).collectList().block();
+
+    assertEquals(100, readEntries.size(), "Should have exactly 100 entries");
+
+    // Verify sequence numbers are consecutive and no duplicates
+    Set<Long> sequenceNumbers = new HashSet<>();
+    for (int i = 0; i < readEntries.size(); i++) {
+      WALEntry entry = readEntries.get(i);
+      assertEquals(i, entry.getSequenceNumber(), "Sequence number should be consecutive");
+      assertTrue(
+          sequenceNumbers.add(entry.getSequenceNumber()),
+          "Duplicate sequence number found: " + entry.getSequenceNumber());
+    }
+
+    // Specifically verify the critical entries around the page boundary
+    assertEquals(97, readEntries.get(97).getSequenceNumber());
+    assertEquals(98, readEntries.get(98).getSequenceNumber());
+    assertEquals(99, readEntries.get(99).getSequenceNumber());
   }
 }

@@ -722,23 +722,48 @@ public class FileBasedWAL implements WriteAheadLog {
       long fromSeq,
       long toSeq)
       throws IOException, WALException {
+    logger.debug(
+        "emitEntriesFromPage: startOffset={}, dataSize={}, fromSeq={}, toSeq={}",
+        startOffset,
+        dataSize,
+        fromSeq,
+        toSeq);
+
     file.seek(startOffset);
     long endPos = startOffset + dataSize;
     long currentPos = file.getFilePointer();
 
+    logger.debug("emitEntriesFromPage: endPos={}, currentPos={}", endPos, currentPos);
+
     while (currentPos < endPos && currentPos < file.length() && !sink.isCancelled()) {
-      if (endPos - currentPos < ENTRY_HEADER_SIZE) break;
+      logger.debug(
+          "emitEntriesFromPage: loop iteration - currentPos={}, endPos={}, remaining={}",
+          currentPos,
+          endPos,
+          endPos - currentPos);
+
+      if (endPos - currentPos < ENTRY_HEADER_SIZE) {
+        logger.debug("emitEntriesFromPage: insufficient space for entry header, breaking");
+        break;
+      }
 
       // Read entry header to get size
       long entryStart = file.getFilePointer();
       byte entryType = file.readByte();
-      if (entryType == 0) break; // Padding
+      logger.debug("emitEntriesFromPage: entryType={} at position={}", entryType, entryStart);
+
+      if (entryType == 0) {
+        logger.debug("emitEntriesFromPage: found padding, breaking");
+        break; // Padding
+      }
 
       file.readLong(); // sequence
       file.readLong(); // timestamp
       int dataLength = file.readInt();
+      logger.debug("emitEntriesFromPage: dataLength={}", dataLength);
 
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
+      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength > endPos) {
+        logger.debug("emitEntriesFromPage: invalid entry size, breaking");
         break; // Invalid entry
       }
 
@@ -747,19 +772,29 @@ public class FileBasedWAL implements WriteAheadLog {
       byte[] entryData = new byte[totalEntrySize];
       file.seek(entryStart);
       file.readFully(entryData);
+      logger.debug("emitEntriesFromPage: read entry data, totalEntrySize={}", totalEntrySize);
 
       try {
         // Deserialize with CRC32 validation
         WALEntry entry = WALEntry.deserialize(entryData);
+        logger.debug("emitEntriesFromPage: deserialized entry seq={}", entry.getSequenceNumber());
 
         // Filter by sequence range
         if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
+          logger.debug("emitEntriesFromPage: emitting entry seq={}", entry.getSequenceNumber());
           sink.next(entry);
           metrics.incrementEntriesRead();
+        } else {
+          logger.debug(
+              "emitEntriesFromPage: entry seq={} outside range {}-{}",
+              entry.getSequenceNumber(),
+              fromSeq,
+              toSeq);
         }
       } catch (WALException e) {
         // Let CRC32 validation errors propagate, but log other deserialization issues
         if (e.getMessage().contains("CRC32")) {
+          logger.error("emitEntriesFromPage: CRC32 validation failed: {}", e.getMessage());
           throw e; // Propagate CRC32 validation errors
         } else {
           // Skip entries that fail deserialization for other reasons
@@ -771,7 +806,10 @@ public class FileBasedWAL implements WriteAheadLog {
       }
 
       currentPos = file.getFilePointer();
+      logger.debug("emitEntriesFromPage: updated currentPos={}", currentPos);
     }
+
+    logger.debug("emitEntriesFromPage: finished processing page");
   }
 
   @Override
@@ -981,7 +1019,7 @@ public class FileBasedWAL implements WriteAheadLog {
       file.readLong(); // timestamp
       int dataLength = file.readInt();
 
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
+      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength > endPos) {
         break; // Invalid entry
       }
 
