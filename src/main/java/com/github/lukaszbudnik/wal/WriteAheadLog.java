@@ -110,4 +110,11 @@ public interface WriteAheadLog extends AutoCloseable {
    * @return true if empty, false otherwise
    */
   boolean isEmpty();
+
+  /**
+   * Get operational metrics for monitoring and performance analysis
+   *
+   * @return WAL metrics instance with cumulative statistics
+   */
+  WALMetrics getMetrics();
 }

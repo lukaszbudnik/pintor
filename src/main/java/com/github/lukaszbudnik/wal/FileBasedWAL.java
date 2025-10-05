@@ -39,6 +39,7 @@ public class FileBasedWAL implements WriteAheadLog {
   private final int maxFileSize;
   private final ReadWriteLock lock = new ReentrantReadWriteLock();
   private final Map<Integer, Path> walFiles = new TreeMap<>();
+  private final WALMetrics metrics = new WALMetrics();
 
   private long currentSequenceNumber = -1;
   private int currentFileIndex = 0;
@@ -195,6 +196,10 @@ public class FileBasedWAL implements WriteAheadLog {
     long fileLength = currentFile.length();
     currentFile.seek(fileLength); // Position at end for appending
 
+    if (isNewFile) {
+      metrics.incrementFilesCreated();
+    }
+
     logger.debug(
         "Opened WAL file: {} (index={}, length={} bytes, isNew={})",
         currentFilePath.getFileName(),
@@ -319,6 +324,10 @@ public class FileBasedWAL implements WriteAheadLog {
     }
 
     logger.debug("Entry written: seq={}, totalSize={} bytes", entry.getSequenceNumber(), entrySize);
+
+    // Update metrics
+    metrics.incrementEntriesWritten();
+    metrics.incrementBytesWritten(entrySize);
   }
 
   /** Write entry that fits in current page. */
@@ -447,6 +456,9 @@ public class FileBasedWAL implements WriteAheadLog {
         filePositionAfter,
         currentFile.length());
 
+    // Update metrics
+    metrics.incrementPagesWritten();
+
     // Check if we need to rotate file (only if not in middle of spanning entry)
     if (continuationFlags == WALPageHeader.NO_CONTINUATION
         || continuationFlags == WALPageHeader.LAST_PART) {
@@ -537,6 +549,7 @@ public class FileBasedWAL implements WriteAheadLog {
     }
 
     logger.debug("Reading entries in sequence range: {}-{}", fromSequenceNumber, toSequenceNumber);
+    metrics.incrementRangeQueries();
 
     return Flux.create(
         sink -> {
@@ -559,6 +572,7 @@ public class FileBasedWAL implements WriteAheadLog {
                 overlappingFiles.add(walFile);
                 logger.debug("File {} overlaps with requested range", walFile.getFileName());
               }
+              metrics.incrementFilesScanned();
             }
 
             logger.debug("Found {} overlapping files to process", overlappingFiles.size());
@@ -639,6 +653,7 @@ public class FileBasedWAL implements WriteAheadLog {
 
         try {
           WALPageHeader header = WALPageHeader.deserialize(headerData);
+          metrics.incrementPagesScanned();
 
           // Skip non-overlapping pages (but not if we're in middle of spanning entry)
           if (spanningEntryData == null
@@ -664,6 +679,7 @@ public class FileBasedWAL implements WriteAheadLog {
               file.seek(currentPos + WALPageHeader.HEADER_SIZE);
               file.readFully(pageData);
               spanningEntryData.write(pageData);
+              metrics.incrementPagesRead();
 
               if (header.isLastPart()) {
                 // Complete spanning entry
@@ -672,6 +688,7 @@ public class FileBasedWAL implements WriteAheadLog {
 
                 if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
                   sink.next(entry);
+                  metrics.incrementEntriesRead();
                 }
 
                 spanningEntryData = null;
@@ -682,6 +699,7 @@ public class FileBasedWAL implements WriteAheadLog {
             // Handle regular page with complete entries
             emitEntriesFromPage(
                 sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromSeq, toSeq);
+            metrics.incrementPagesRead();
           }
 
         } catch (WALException e) {
@@ -704,23 +722,48 @@ public class FileBasedWAL implements WriteAheadLog {
       long fromSeq,
       long toSeq)
       throws IOException, WALException {
+    logger.debug(
+        "emitEntriesFromPage: startOffset={}, dataSize={}, fromSeq={}, toSeq={}",
+        startOffset,
+        dataSize,
+        fromSeq,
+        toSeq);
+
     file.seek(startOffset);
     long endPos = startOffset + dataSize;
     long currentPos = file.getFilePointer();
 
+    logger.debug("emitEntriesFromPage: endPos={}, currentPos={}", endPos, currentPos);
+
     while (currentPos < endPos && currentPos < file.length() && !sink.isCancelled()) {
-      if (endPos - currentPos < ENTRY_HEADER_SIZE) break;
+      logger.debug(
+          "emitEntriesFromPage: loop iteration - currentPos={}, endPos={}, remaining={}",
+          currentPos,
+          endPos,
+          endPos - currentPos);
+
+      if (endPos - currentPos < ENTRY_HEADER_SIZE) {
+        logger.debug("emitEntriesFromPage: insufficient space for entry header, breaking");
+        break;
+      }
 
       // Read entry header to get size
       long entryStart = file.getFilePointer();
       byte entryType = file.readByte();
-      if (entryType == 0) break; // Padding
+      logger.debug("emitEntriesFromPage: entryType={} at position={}", entryType, entryStart);
+
+      if (entryType == 0) {
+        logger.debug("emitEntriesFromPage: found padding, breaking");
+        break; // Padding
+      }
 
       file.readLong(); // sequence
       file.readLong(); // timestamp
       int dataLength = file.readInt();
+      logger.debug("emitEntriesFromPage: dataLength={}", dataLength);
 
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
+      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength > endPos) {
+        logger.debug("emitEntriesFromPage: invalid entry size, breaking");
         break; // Invalid entry
       }
 
@@ -729,18 +772,29 @@ public class FileBasedWAL implements WriteAheadLog {
       byte[] entryData = new byte[totalEntrySize];
       file.seek(entryStart);
       file.readFully(entryData);
+      logger.debug("emitEntriesFromPage: read entry data, totalEntrySize={}", totalEntrySize);
 
       try {
         // Deserialize with CRC32 validation
         WALEntry entry = WALEntry.deserialize(entryData);
+        logger.debug("emitEntriesFromPage: deserialized entry seq={}", entry.getSequenceNumber());
 
         // Filter by sequence range
         if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
+          logger.debug("emitEntriesFromPage: emitting entry seq={}", entry.getSequenceNumber());
           sink.next(entry);
+          metrics.incrementEntriesRead();
+        } else {
+          logger.debug(
+              "emitEntriesFromPage: entry seq={} outside range {}-{}",
+              entry.getSequenceNumber(),
+              fromSeq,
+              toSeq);
         }
       } catch (WALException e) {
         // Let CRC32 validation errors propagate, but log other deserialization issues
         if (e.getMessage().contains("CRC32")) {
+          logger.error("emitEntriesFromPage: CRC32 validation failed: {}", e.getMessage());
           throw e; // Propagate CRC32 validation errors
         } else {
           // Skip entries that fail deserialization for other reasons
@@ -752,7 +806,10 @@ public class FileBasedWAL implements WriteAheadLog {
       }
 
       currentPos = file.getFilePointer();
+      logger.debug("emitEntriesFromPage: updated currentPos={}", currentPos);
     }
+
+    logger.debug("emitEntriesFromPage: finished processing page");
   }
 
   @Override
@@ -767,6 +824,7 @@ public class FileBasedWAL implements WriteAheadLog {
     }
 
     logger.debug("Reading entries in timestamp range: {} to {}", fromTimestamp, toTimestamp);
+    metrics.incrementRangeQueries();
 
     return Flux.create(
         sink -> {
@@ -789,6 +847,7 @@ public class FileBasedWAL implements WriteAheadLog {
                 overlappingFiles.add(walFile);
                 logger.debug("File {} overlaps with timestamp range", walFile.getFileName());
               }
+              metrics.incrementFilesScanned();
             }
 
             logger.debug("Found {} overlapping files for timestamp range", overlappingFiles.size());
@@ -875,6 +934,7 @@ public class FileBasedWAL implements WriteAheadLog {
 
         try {
           WALPageHeader header = WALPageHeader.deserialize(headerData);
+          metrics.incrementPagesScanned();
 
           // Skip non-overlapping pages (but not if we're in middle of spanning entry)
           if (spanningEntryData == null
@@ -901,6 +961,7 @@ public class FileBasedWAL implements WriteAheadLog {
               file.seek(currentPos + WALPageHeader.HEADER_SIZE);
               file.readFully(pageData);
               spanningEntryData.write(pageData);
+              metrics.incrementPagesRead();
 
               if (header.isLastPart()) {
                 // Complete spanning entry
@@ -910,6 +971,7 @@ public class FileBasedWAL implements WriteAheadLog {
                 // Filter by timestamp range
                 if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
                   sink.next(entry);
+                  metrics.incrementEntriesRead();
                 }
 
                 spanningEntryData = null;
@@ -920,6 +982,7 @@ public class FileBasedWAL implements WriteAheadLog {
             // Handle regular page with complete entries
             emitEntriesFromPageByTimestamp(
                 sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromTs, toTs);
+            metrics.incrementPagesRead();
           }
 
         } catch (WALException e) {
@@ -956,7 +1019,7 @@ public class FileBasedWAL implements WriteAheadLog {
       file.readLong(); // timestamp
       int dataLength = file.readInt();
 
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength + 4 > endPos) {
+      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength > endPos) {
         break; // Invalid entry
       }
 
@@ -973,6 +1036,7 @@ public class FileBasedWAL implements WriteAheadLog {
         // Filter by timestamp range
         if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
           sink.next(entry);
+          metrics.incrementEntriesRead();
         }
       } catch (WALException e) {
         // Let CRC32 validation errors propagate, but log other deserialization issues
@@ -1077,6 +1141,11 @@ public class FileBasedWAL implements WriteAheadLog {
   @Override
   public boolean isEmpty() {
     return currentSequenceNumber == -1;
+  }
+
+  @Override
+  public WALMetrics getMetrics() {
+    return metrics;
   }
 
   @Override
