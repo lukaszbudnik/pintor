@@ -37,7 +37,7 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("io.projectreactor:reactor-core:3.7.11")
 
-    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
+    testImplementation("org.junit.jupiter:junit-jupiter:6.0.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("org.mockito:mockito-core:5.20.0")
     testImplementation("org.mockito:mockito-junit-jupiter:5.20.0")
