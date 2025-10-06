@@ -8,6 +8,7 @@ Pintor is a robust, thread-safe Java implementation of a Write Ahead Log (WAL) s
 - 📁 **File-based persistence**: Automatic rotation, binary serialization with CRC32 for integrity.
 - 🔄 **Recovery capabilities**: Point-in-time recovery by sequence or timestamp; persists across restarts.
 - ⚡ **Performance optimizations**: Batch APIs, configurable sync, efficient seeking and truncation.
+- 🚀 **Binary search optimization**: Two-level logarithmic range queries: O(log(files) + log(pages)) vs O(files × pages)).
 - 🧩 **Flexible design**: Generic record types, clean encapsulation.
 - 🤖 **AI-assisted development**: Generated codebase for production readiness.
 
@@ -315,6 +316,39 @@ Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=305-305]
 3. Process overlapping files: For each overlapping WAL file, read all pages
 4. Skip non-overlapping pages: Within each file, skip pages whose ranges don't overlap with the requested range
 5. Filter and return entries: From overlapping pages, return only WAL entries that fall within the requested range
+
+## Optimized Range Query Algorithm
+
+Pintor employs a two-level binary search optimization for efficient range queries, leveraging the sorted nature of both WAL files and pages within files.
+
+### Algorithm Overview
+
+**File-level Binary Search:**
+1. Binary search WAL file list (`wal-0.log`, `wal-1.log`, etc.) to identify files whose ranges intersect with the query range
+2. Read only the first and last page headers from candidate files during the search
+3. Complexity: O(log(files)) instead of O(files)
+
+**Page-level Binary Search:**
+1. Within each intersecting file, binary search page headers to find the first and last pages that overlap with the query range
+2. Read only necessary page headers during the search
+3. Complexity: O(log(pages_per_file)) instead of O(pages_per_file)
+
+### Performance Benefits
+
+- **Reduced I/O**: Only reads headers from files/pages that could contain relevant data
+- **Logarithmic scaling**: Query time scales with log(data_size) rather than linearly
+- **Efficient seeking**: Direct jump to relevant pages without scanning intermediate content
+
+### Search Guarantees
+
+- **File ordering**: WAL files maintain non-overlapping, chronologically ordered ranges
+- **Page ordering**: Pages within files maintain strictly increasing sequence/timestamp ranges
+- **Range integrity**: Binary search correctness guaranteed by monotonic ordering at both levels
+
+This optimization is particularly effective for:
+- Large WAL deployments with many files
+- Sparse range queries (small ranges within large datasets)
+- Point-in-time recovery scenarios
 
 ## API Summary
 
