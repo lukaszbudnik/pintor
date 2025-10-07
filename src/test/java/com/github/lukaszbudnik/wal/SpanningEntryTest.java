@@ -202,35 +202,36 @@ class SpanningEntryTest {
   void testSpanningEntryReadByTimestamp() throws Exception {
     // Create entries with some time separation to enable timestamp-based queries
     Instant startTime = Instant.now().minusSeconds(10);
-    
+
     // Add small entries first
     wal.createAndAppend(ByteBuffer.wrap("before1".getBytes()));
     Thread.sleep(5); // Ensure some time separation
     wal.createAndAppend(ByteBuffer.wrap("before2".getBytes()));
     Thread.sleep(5);
-    
+
     // Add large entry that will span multiple pages
     String largeData = "x".repeat(8000); // 8000 bytes should span 2-3 pages
     WALEntry spanningEntry = wal.createAndAppend(ByteBuffer.wrap(largeData.getBytes()));
     Thread.sleep(5);
-    
+
     // Add more entries after spanning entry
     wal.createAndAppend(ByteBuffer.wrap("after1".getBytes()));
     Thread.sleep(5);
     wal.createAndAppend(ByteBuffer.wrap("after2".getBytes()));
-    
+
     Instant endTime = Instant.now().plusSeconds(10);
     wal.sync();
 
-    // Test: Read all entries by timestamp range (this will exercise the spanning entry code in emitEntriesFromFileByTimestamp)
+    // Test: Read all entries by timestamp range (this will exercise the spanning entry code in
+    // emitEntriesFromFileByTimestamp)
     List<WALEntry> allEntries = Flux.from(wal.readRange(startTime, endTime)).collectList().block();
     assertEquals(5, allEntries.size(), "Should read all 5 entries including the spanning entry");
-    
+
     // Verify the spanning entry is correctly reconstructed when read by timestamp
     WALEntry readSpanningEntry = allEntries.get(2); // Should be the 3rd entry (index 2)
     assertEquals(spanningEntry.getSequenceNumber(), readSpanningEntry.getSequenceNumber());
     assertEquals(largeData, new String(readSpanningEntry.getDataAsBytes()));
-    
+
     // Verify all entries are in correct order
     assertEquals("before1", new String(allEntries.get(0).getDataAsBytes()));
     assertEquals("before2", new String(allEntries.get(1).getDataAsBytes()));
