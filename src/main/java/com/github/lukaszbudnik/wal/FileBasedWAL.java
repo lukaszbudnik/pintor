@@ -544,35 +544,35 @@ public class FileBasedWAL implements WriteAheadLog {
 
   @Override
   public Publisher<WALEntry> readRange(long fromSequenceNumber, long toSequenceNumber) {
-    if (fromSequenceNumber > toSequenceNumber) {
+    return readRange(RangeQuery.bySequence(fromSequenceNumber, toSequenceNumber));
+  }
+
+  private <T extends Comparable<T>> Publisher<WALEntry> readRange(RangeQuery<T> query) {
+    if (!query.isValidRange()) {
       return Flux.error(new WALException("Invalid range: from > to"));
     }
 
-    logger.debug("Reading entries in sequence range: {}-{}", fromSequenceNumber, toSequenceNumber);
+    logger.debug("Reading entries in range: {} to {}", query.getFrom(), query.getTo());
     metrics.incrementRangeQueries();
 
     return Flux.create(
         sink -> {
           try {
             try {
-              // Flush current page to ensure all data is on disk
               sync();
             } catch (WALException e) {
               sink.error(new WALException("Failed to flush page before read", e));
               return;
             }
 
-            // Step 1 & 2: Binary search WAL files for overlapping ranges
-            List<Path> overlappingFiles =
-                findOverlappingFilesBinarySearch(fromSequenceNumber, toSequenceNumber);
+            List<Path> overlappingFiles = findOverlappingFiles(query);
             logger.debug("Found {} overlapping files to process", overlappingFiles.size());
 
-            // Step 3, 4 & 5: Process overlapping files and emit entries
             for (Path walFile : overlappingFiles) {
               if (sink.isCancelled()) break;
 
               try {
-                emitEntriesFromFileBySequence(sink, walFile, fromSequenceNumber, toSequenceNumber);
+                emitEntriesFromFile(sink, walFile, query);
               } catch (IOException e) {
                 logger.error(
                     "Failed to read from file {}: {}", walFile.getFileName(), e.getMessage());
@@ -590,39 +590,7 @@ public class FileBasedWAL implements WriteAheadLog {
         FluxSink.OverflowStrategy.BUFFER);
   }
 
-  private boolean fileOverlapsSequenceRange(Path walFile, long fromSeq, long toSeq)
-      throws WALException {
-    try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
-      long fileSize = file.length();
-      if (fileSize == 0) return false;
-
-      // Read first page header
-      if (fileSize < WALPageHeader.HEADER_SIZE) return false;
-      file.seek(0);
-      byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-      file.readFully(headerData);
-      WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
-
-      // Read last page header
-      long lastPageOffset = fileSize - PAGE_SIZE;
-
-      if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
-        file.seek(lastPageOffset);
-        file.readFully(headerData);
-        WALPageHeader lastHeader = WALPageHeader.deserialize(headerData);
-
-        // Check if file range overlaps with requested range
-        return !(lastHeader.getLastSequence() < fromSeq || firstHeader.getFirstSequence() > toSeq);
-      }
-
-      // Fallback: assume overlap if can't read last header
-      return firstHeader.getFirstSequence() <= toSeq;
-    } catch (Exception e) {
-      throw new WALException("Failed to check file overlap: " + walFile, e);
-    }
-  }
-
-  private List<Path> findOverlappingFilesBinarySearch(long fromSeq, long toSeq)
+  private <T extends Comparable<T>> List<Path> findOverlappingFiles(RangeQuery<T> query)
       throws WALException {
     List<Path> sortedFiles = new ArrayList<>(walFiles.values());
     sortedFiles.removeIf(file -> !Files.exists(file));
@@ -633,14 +601,12 @@ public class FileBasedWAL implements WriteAheadLog {
 
     logger.debug("Binary searching {} WAL files for overlapping ranges", sortedFiles.size());
 
-    // Files are already sorted by index (wal-0.log, wal-1.log, etc.)
-    // Use binary search to find first and last overlapping files
-    int firstOverlapping = findFirstOverlappingFile(sortedFiles, fromSeq, toSeq);
+    int firstOverlapping = findFirstOverlappingFile(sortedFiles, query);
     if (firstOverlapping == -1) {
-      return new ArrayList<>(); // No overlapping files found
+      return new ArrayList<>();
     }
 
-    int lastOverlapping = findLastOverlappingFile(sortedFiles, fromSeq, toSeq, firstOverlapping);
+    int lastOverlapping = findLastOverlappingFile(sortedFiles, query, firstOverlapping);
 
     List<Path> overlappingFiles = new ArrayList<>();
     for (int i = firstOverlapping; i <= lastOverlapping; i++) {
@@ -648,14 +614,12 @@ public class FileBasedWAL implements WriteAheadLog {
       logger.debug("File {} overlaps with requested range", sortedFiles.get(i).getFileName());
     }
 
-    // Update metrics - only count files we actually checked during binary search
     metrics.incrementFilesScanned(countFilesScannedInBinarySearch(sortedFiles.size()));
-
     return overlappingFiles;
   }
 
-  private int findFirstOverlappingFile(List<Path> sortedFiles, long fromSeq, long toSeq)
-      throws WALException {
+  private <T extends Comparable<T>> int findFirstOverlappingFile(
+      List<Path> sortedFiles, RangeQuery<T> query) throws WALException {
     int left = 0, right = sortedFiles.size() - 1;
     int result = -1;
 
@@ -663,25 +627,23 @@ public class FileBasedWAL implements WriteAheadLog {
       int mid = left + (right - left) / 2;
       Path file = sortedFiles.get(mid);
 
-      if (fileOverlapsSequenceRange(file, fromSeq, toSeq)) {
+      if (fileOverlapsRange(file, query)) {
         result = mid;
-        right = mid - 1; // Continue searching left for first overlapping file
+        right = mid - 1;
       } else {
-        // Check if this file is before or after our range
-        FileSequenceRange range = getFileSequenceRange(file);
-        if (range.lastSequence < fromSeq) {
-          left = mid + 1; // File is before our range, search right
+        FileRange<T> range = getFileRange(file, query);
+        if (range != null && range.lastValue.compareTo(query.getFrom()) < 0) {
+          left = mid + 1;
         } else {
-          right = mid - 1; // File is after our range, search left
+          right = mid - 1;
         }
       }
     }
-
     return result;
   }
 
-  private int findLastOverlappingFile(
-      List<Path> sortedFiles, long fromSeq, long toSeq, int startFrom) throws WALException {
+  private <T extends Comparable<T>> int findLastOverlappingFile(
+      List<Path> sortedFiles, RangeQuery<T> query, int startFrom) throws WALException {
     int left = startFrom, right = sortedFiles.size() - 1;
     int result = startFrom;
 
@@ -689,48 +651,185 @@ public class FileBasedWAL implements WriteAheadLog {
       int mid = left + (right - left) / 2;
       Path file = sortedFiles.get(mid);
 
-      if (fileOverlapsSequenceRange(file, fromSeq, toSeq)) {
+      if (fileOverlapsRange(file, query)) {
         result = mid;
-        left = mid + 1; // Continue searching right for last overlapping file
+        left = mid + 1;
       } else {
-        // Check if this file is before or after our range
-        FileSequenceRange range = getFileSequenceRange(file);
-        if (range.lastSequence < fromSeq) {
-          left = mid + 1; // File is before our range, search right
+        FileRange<T> range = getFileRange(file, query);
+        if (range != null && range.lastValue.compareTo(query.getFrom()) < 0) {
+          left = mid + 1;
         } else {
-          right = mid - 1; // File is after our range, search left
+          right = mid - 1;
         }
       }
     }
-
     return result;
   }
 
-  private FileSequenceRange getFileSequenceRange(Path walFile) throws WALException {
+  private <T extends Comparable<T>> boolean fileOverlapsRange(Path walFile, RangeQuery<T> query)
+      throws WALException {
     try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
       long fileSize = file.length();
-      if (fileSize == 0) return new FileSequenceRange(-1, -1);
+      if (fileSize == 0) return false;
+      if (fileSize < WALPageHeader.HEADER_SIZE) return false;
 
-      // Read first page header
-      if (fileSize < WALPageHeader.HEADER_SIZE) return new FileSequenceRange(-1, -1);
       file.seek(0);
       byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
       file.readFully(headerData);
       WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
 
-      // Read last page header
       long lastPageOffset = fileSize - PAGE_SIZE;
       if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
         file.seek(lastPageOffset);
         file.readFully(headerData);
         WALPageHeader lastHeader = WALPageHeader.deserialize(headerData);
-        return new FileSequenceRange(firstHeader.getFirstSequence(), lastHeader.getLastSequence());
+
+        WALPageHeader combinedHeader =
+            new WALPageHeader(
+                firstHeader.getFirstSequence(),
+                lastHeader.getLastSequence(),
+                firstHeader.getFirstTimestamp(),
+                lastHeader.getLastTimestamp(),
+                (short) 0,
+                (short) 0);
+        return query.headerOverlapsRange(combinedHeader);
       }
 
-      // Fallback: single page file
-      return new FileSequenceRange(firstHeader.getFirstSequence(), firstHeader.getLastSequence());
+      return query.headerOverlapsRange(firstHeader);
     } catch (Exception e) {
-      throw new WALException("Failed to get file sequence range: " + walFile, e);
+      throw new WALException("Failed to check file overlap: " + walFile, e);
+    }
+  }
+
+  private <T extends Comparable<T>> void emitEntriesFromFile(
+      FluxSink<WALEntry> sink, Path walFile, RangeQuery<T> query) throws IOException, WALException {
+    logger.debug(
+        "Emitting entries from file: {} (range: {} to {})",
+        walFile.getFileName(),
+        query.getFrom(),
+        query.getTo());
+
+    try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
+      long fileSize = file.length();
+
+      ByteArrayOutputStream spanningEntryData = null;
+      long spanningEntrySequence = -1;
+
+      for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += PAGE_SIZE) {
+        if (sink.isCancelled()) break;
+
+        file.seek(offset);
+        byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
+        file.readFully(headerData);
+
+        try {
+          WALPageHeader header = WALPageHeader.deserialize(headerData);
+          metrics.incrementPagesScanned();
+
+          long pageEnd = Math.min(offset + PAGE_SIZE, fileSize);
+          long dataSize = pageEnd - offset - WALPageHeader.HEADER_SIZE;
+
+          if (header.isSpanningRecord()) {
+            if (header.isFirstPart()) {
+              spanningEntryData = new ByteArrayOutputStream();
+              spanningEntrySequence = header.getFirstSequence();
+            }
+
+            if (spanningEntryData != null) {
+              byte[] pageData = new byte[(int) dataSize];
+              file.seek(offset + WALPageHeader.HEADER_SIZE);
+              file.readFully(pageData);
+              spanningEntryData.write(pageData);
+              metrics.incrementPagesRead();
+
+              if (header.isLastPart()) {
+                byte[] completeEntryData = spanningEntryData.toByteArray();
+                try {
+                  WALEntry entry = WALEntry.deserialize(completeEntryData);
+
+                  if (query.entryInRange(entry)) {
+                    sink.next(entry);
+                    metrics.incrementEntriesRead();
+                  }
+                } catch (WALException e) {
+                  sink.error(new WALException("Corrupted page at offset " + offset, e));
+                  return;
+                }
+
+                spanningEntryData = null;
+                spanningEntrySequence = -1;
+              }
+            }
+          } else {
+            if (query.headerOverlapsRange(header)) {
+              try {
+                emitEntriesFromPage(
+                    sink, file, offset + WALPageHeader.HEADER_SIZE, dataSize, query);
+                metrics.incrementPagesRead();
+              } catch (WALException e) {
+                sink.error(e);
+                return;
+              }
+            }
+          }
+
+        } catch (WALException e) {
+          sink.error(
+              new WALException("Corrupted page at offset " + offset + ": " + e.getMessage(), e));
+          return;
+        }
+      }
+    }
+  }
+
+  private <T extends Comparable<T>> void emitEntriesFromPage(
+      FluxSink<WALEntry> sink,
+      RandomAccessFile file,
+      long startOffset,
+      long dataSize,
+      RangeQuery<T> query)
+      throws IOException, WALException {
+    file.seek(startOffset);
+    long endPos = startOffset + dataSize;
+
+    while (file.getFilePointer() < endPos
+        && file.getFilePointer() < file.length()
+        && !sink.isCancelled()) {
+      if (endPos - file.getFilePointer() < ENTRY_HEADER_SIZE) {
+        break;
+      }
+
+      long entryStart = file.getFilePointer();
+      byte entryType = file.readByte();
+
+      if (entryType == 0) {
+        break; // Padding
+      }
+
+      file.readLong(); // sequence
+      file.readLong(); // timestamp
+      int dataLength = file.readInt();
+
+      if (dataLength < 0 || file.getFilePointer() + dataLength > endPos) {
+        break; // Invalid entry
+      }
+
+      int totalEntrySize = ENTRY_HEADER_SIZE + dataLength;
+      byte[] entryData = new byte[totalEntrySize];
+      file.seek(entryStart);
+      file.readFully(entryData);
+
+      try {
+        WALEntry entry = WALEntry.deserialize(entryData);
+        if (query.entryInRange(entry)) {
+          sink.next(entry);
+          metrics.incrementEntriesRead();
+        }
+      } catch (WALException e) {
+        // Wrap CRC32 validation errors in a "Corrupted page" message for test compatibility
+        throw new WALException(
+            "Corrupted page at offset " + (startOffset - WALPageHeader.HEADER_SIZE), e);
+      }
     }
   }
 
@@ -740,190 +839,44 @@ public class FileBasedWAL implements WriteAheadLog {
     return Math.max(1, (int) Math.ceil(2 * Math.log(totalFiles) / Math.log(2)));
   }
 
-  private static class FileSequenceRange {
-    final long firstSequence;
-    final long lastSequence;
-
-    FileSequenceRange(long firstSequence, long lastSequence) {
-      this.firstSequence = firstSequence;
-      this.lastSequence = lastSequence;
-    }
-  }
-
-  private void emitEntriesFromFileBySequence(
-      FluxSink<WALEntry> sink, Path walFile, long fromSeq, long toSeq)
-      throws IOException, WALException {
-    logger.debug(
-        "Emitting entries from file: {} (range: {}-{})", walFile.getFileName(), fromSeq, toSeq);
-
+  private <T extends Comparable<T>> FileRange<T> getFileRange(Path walFile, RangeQuery<T> query)
+      throws WALException {
     try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
       long fileSize = file.length();
+      if (fileSize == 0) return null;
+      if (fileSize < WALPageHeader.HEADER_SIZE) return null;
 
-      // Use binary search to find overlapping pages
-      List<Long> overlappingPageOffsets =
-          findOverlappingPagesBySequence(file, fileSize, fromSeq, toSeq);
+      file.seek(0);
+      byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
+      file.readFully(headerData);
+      WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
 
-      // State for spanning entry reconstruction
-      ByteArrayOutputStream spanningEntryData = null;
-      long spanningEntrySequence = -1;
-
-      for (long currentPos : overlappingPageOffsets) {
-        if (sink.isCancelled()) break;
-
-        file.seek(currentPos);
-        byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
+      long lastPageOffset = fileSize - PAGE_SIZE;
+      if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
+        file.seek(lastPageOffset);
         file.readFully(headerData);
-
-        try {
-          WALPageHeader header = WALPageHeader.deserialize(headerData);
-          metrics.incrementPagesScanned();
-
-          long pageEnd = Math.min(currentPos + PAGE_SIZE, fileSize);
-          long dataSize = pageEnd - currentPos - WALPageHeader.HEADER_SIZE;
-
-          if (header.isSpanningRecord()) {
-            // Handle spanning entry
-            if (header.isFirstPart()) {
-              // Start new spanning entry
-              spanningEntryData = new ByteArrayOutputStream();
-              spanningEntrySequence = header.getFirstSequence();
-            }
-
-            if (spanningEntryData != null) {
-              // Read page data
-              byte[] pageData = new byte[(int) dataSize];
-              file.seek(currentPos + WALPageHeader.HEADER_SIZE);
-              file.readFully(pageData);
-              spanningEntryData.write(pageData);
-              metrics.incrementPagesRead();
-
-              if (header.isLastPart()) {
-                // Complete spanning entry
-                byte[] completeEntryData = spanningEntryData.toByteArray();
-                WALEntry entry = WALEntry.deserialize(completeEntryData);
-
-                if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
-                  sink.next(entry);
-                  metrics.incrementEntriesRead();
-                }
-
-                spanningEntryData = null;
-                spanningEntrySequence = -1;
-              }
-            }
-          } else {
-            // Handle regular page with complete entries
-            emitEntriesFromPage(
-                sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromSeq, toSeq);
-            metrics.incrementPagesRead();
-          }
-
-        } catch (WALException e) {
-          sink.error(
-              new WALException(
-                  "Corrupted page at offset " + currentPos + ": " + e.getMessage(), e));
-          return;
-        }
+        WALPageHeader lastHeader = WALPageHeader.deserialize(headerData);
+        return new FileRange<>(
+            query.getHeaderFromExtractor().apply(firstHeader),
+            query.getHeaderToExtractor().apply(lastHeader));
       }
+
+      return new FileRange<>(
+          query.getHeaderFromExtractor().apply(firstHeader),
+          query.getHeaderToExtractor().apply(firstHeader));
+    } catch (Exception e) {
+      throw new WALException("Failed to get file range: " + walFile, e);
     }
   }
 
-  private void emitEntriesFromPage(
-      FluxSink<WALEntry> sink,
-      RandomAccessFile file,
-      long startOffset,
-      long dataSize,
-      long fromSeq,
-      long toSeq)
-      throws IOException, WALException {
-    logger.debug(
-        "emitEntriesFromPage: startOffset={}, dataSize={}, fromSeq={}, toSeq={}",
-        startOffset,
-        dataSize,
-        fromSeq,
-        toSeq);
+  private static class FileRange<T> {
+    final T firstValue;
+    final T lastValue;
 
-    file.seek(startOffset);
-    long endPos = startOffset + dataSize;
-    long currentPos = file.getFilePointer();
-
-    logger.debug("emitEntriesFromPage: endPos={}, currentPos={}", endPos, currentPos);
-
-    while (currentPos < endPos && currentPos < file.length() && !sink.isCancelled()) {
-      logger.debug(
-          "emitEntriesFromPage: loop iteration - currentPos={}, endPos={}, remaining={}",
-          currentPos,
-          endPos,
-          endPos - currentPos);
-
-      if (endPos - currentPos < ENTRY_HEADER_SIZE) {
-        logger.debug("emitEntriesFromPage: insufficient space for entry header, breaking");
-        break;
-      }
-
-      // Read entry header to get size
-      long entryStart = file.getFilePointer();
-      byte entryType = file.readByte();
-      logger.debug("emitEntriesFromPage: entryType={} at position={}", entryType, entryStart);
-
-      if (entryType == 0) {
-        logger.debug("emitEntriesFromPage: found padding, breaking");
-        break; // Padding
-      }
-
-      file.readLong(); // sequence
-      file.readLong(); // timestamp
-      int dataLength = file.readInt();
-      logger.debug("emitEntriesFromPage: dataLength={}", dataLength);
-
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength > endPos) {
-        logger.debug("emitEntriesFromPage: invalid entry size, breaking");
-        break; // Invalid entry
-      }
-
-      // Read complete entry data
-      int totalEntrySize = ENTRY_HEADER_SIZE + dataLength;
-      byte[] entryData = new byte[totalEntrySize];
-      file.seek(entryStart);
-      file.readFully(entryData);
-      logger.debug("emitEntriesFromPage: read entry data, totalEntrySize={}", totalEntrySize);
-
-      try {
-        // Deserialize with CRC32 validation
-        WALEntry entry = WALEntry.deserialize(entryData);
-        logger.debug("emitEntriesFromPage: deserialized entry seq={}", entry.getSequenceNumber());
-
-        // Filter by sequence range
-        if (entry.getSequenceNumber() >= fromSeq && entry.getSequenceNumber() <= toSeq) {
-          logger.debug("emitEntriesFromPage: emitting entry seq={}", entry.getSequenceNumber());
-          sink.next(entry);
-          metrics.incrementEntriesRead();
-        } else {
-          logger.debug(
-              "emitEntriesFromPage: entry seq={} outside range {}-{}",
-              entry.getSequenceNumber(),
-              fromSeq,
-              toSeq);
-        }
-      } catch (WALException e) {
-        // Let CRC32 validation errors propagate, but log other deserialization issues
-        if (e.getMessage().contains("CRC32")) {
-          logger.error("emitEntriesFromPage: CRC32 validation failed: {}", e.getMessage());
-          throw e; // Propagate CRC32 validation errors
-        } else {
-          // Skip entries that fail deserialization for other reasons
-          logger.debug(
-              "Skipping entry that failed deserialization at position {}: {}",
-              entryStart,
-              e.getMessage());
-        }
-      }
-
-      currentPos = file.getFilePointer();
-      logger.debug("emitEntriesFromPage: updated currentPos={}", currentPos);
+    FileRange(T firstValue, T lastValue) {
+      this.firstValue = firstValue;
+      this.lastValue = lastValue;
     }
-
-    logger.debug("emitEntriesFromPage: finished processing page");
   }
 
   @Override
@@ -933,564 +886,7 @@ public class FileBasedWAL implements WriteAheadLog {
 
   @Override
   public Publisher<WALEntry> readRange(Instant fromTimestamp, Instant toTimestamp) {
-    if (fromTimestamp.isAfter(toTimestamp)) {
-      return Flux.error(new WALException("Invalid range: from > to"));
-    }
-
-    logger.debug("Reading entries in timestamp range: {} to {}", fromTimestamp, toTimestamp);
-    metrics.incrementRangeQueries();
-
-    return Flux.create(
-        sink -> {
-          try {
-            try {
-              // Flush current page to ensure all data is on disk
-              sync();
-            } catch (WALException e) {
-              sink.error(new WALException("Failed to flush page before read", e));
-              return;
-            }
-
-            // Step 1 & 2: Binary search WAL files for timestamp overlapping ranges
-            List<Path> overlappingFiles =
-                findOverlappingFilesBinarySearchByTimestamp(fromTimestamp, toTimestamp);
-            logger.debug("Found {} overlapping files for timestamp range", overlappingFiles.size());
-
-            // Step 3, 4 & 5: Process overlapping files and emit entries
-            for (Path walFile : overlappingFiles) {
-              if (sink.isCancelled()) break;
-
-              try {
-                emitEntriesFromFileByTimestamp(sink, walFile, fromTimestamp, toTimestamp);
-              } catch (IOException e) {
-                logger.error(
-                    "Failed to read from file {} by timestamp: {}",
-                    walFile.getFileName(),
-                    e.getMessage());
-                sink.error(new WALException("Failed to read from file: " + walFile, e));
-                return;
-              }
-            }
-
-            sink.complete();
-            logger.debug("Timestamp read operation completed");
-          } catch (Exception e) {
-            sink.error(e);
-          }
-        },
-        FluxSink.OverflowStrategy.BUFFER);
-  }
-
-  private boolean fileOverlapsTimestampRange(Path walFile, Instant fromTs, Instant toTs)
-      throws WALException {
-    try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
-      long fileSize = file.length();
-      if (fileSize == 0) return false;
-
-      // Read first page header
-      if (fileSize < WALPageHeader.HEADER_SIZE) return false;
-      file.seek(0);
-      byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-      file.readFully(headerData);
-      WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
-
-      // Read last page header
-      long lastPageOffset = fileSize - PAGE_SIZE;
-      if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
-        file.seek(lastPageOffset);
-        file.readFully(headerData);
-        WALPageHeader lastHeader = WALPageHeader.deserialize(headerData);
-
-        // Check if file range overlaps with requested range
-        return !(lastHeader.getLastTimestamp().isBefore(fromTs)
-            || firstHeader.getFirstTimestamp().isAfter(toTs));
-      }
-
-      // Fallback: assume overlap if can't read last header
-      return !firstHeader.getFirstTimestamp().isAfter(toTs);
-    } catch (Exception e) {
-      throw new WALException("Failed to check file overlap: " + walFile, e);
-    }
-  }
-
-  private List<Path> findOverlappingFilesBinarySearchByTimestamp(Instant fromTs, Instant toTs)
-      throws WALException {
-    List<Path> sortedFiles = new ArrayList<>(walFiles.values());
-    sortedFiles.removeIf(file -> !Files.exists(file));
-
-    if (sortedFiles.isEmpty()) {
-      return new ArrayList<>();
-    }
-
-    logger.debug(
-        "Binary searching {} WAL files for timestamp overlapping ranges", sortedFiles.size());
-
-    // Files are already sorted by index (wal-0.log, wal-1.log, etc.)
-    // Use binary search to find first and last overlapping files
-    int firstOverlapping = findFirstOverlappingFileByTimestamp(sortedFiles, fromTs, toTs);
-    if (firstOverlapping == -1) {
-      return new ArrayList<>(); // No overlapping files found
-    }
-
-    int lastOverlapping =
-        findLastOverlappingFileByTimestamp(sortedFiles, fromTs, toTs, firstOverlapping);
-
-    List<Path> overlappingFiles = new ArrayList<>();
-    for (int i = firstOverlapping; i <= lastOverlapping; i++) {
-      overlappingFiles.add(sortedFiles.get(i));
-      logger.debug("File {} overlaps with timestamp range", sortedFiles.get(i).getFileName());
-    }
-
-    // Update metrics - only count files we actually checked during binary search
-    metrics.incrementFilesScanned(countFilesScannedInBinarySearch(sortedFiles.size()));
-
-    return overlappingFiles;
-  }
-
-  private int findFirstOverlappingFileByTimestamp(
-      List<Path> sortedFiles, Instant fromTs, Instant toTs) throws WALException {
-    int left = 0, right = sortedFiles.size() - 1;
-    int result = -1;
-
-    while (left <= right) {
-      int mid = left + (right - left) / 2;
-      Path file = sortedFiles.get(mid);
-
-      if (fileOverlapsTimestampRange(file, fromTs, toTs)) {
-        result = mid;
-        right = mid - 1; // Continue searching left for first overlapping file
-      } else {
-        // Check if this file is before or after our range
-        FileTimestampRange range = getFileTimestampRange(file);
-        if (range.lastTimestamp.isBefore(fromTs)) {
-          left = mid + 1; // File is before our range, search right
-        } else {
-          right = mid - 1; // File is after our range, search left
-        }
-      }
-    }
-
-    return result;
-  }
-
-  private int findLastOverlappingFileByTimestamp(
-      List<Path> sortedFiles, Instant fromTs, Instant toTs, int startFrom) throws WALException {
-    int left = startFrom, right = sortedFiles.size() - 1;
-    int result = startFrom;
-
-    while (left <= right) {
-      int mid = left + (right - left) / 2;
-      Path file = sortedFiles.get(mid);
-
-      if (fileOverlapsTimestampRange(file, fromTs, toTs)) {
-        result = mid;
-        left = mid + 1; // Continue searching right for last overlapping file
-      } else {
-        // Check if this file is before or after our range
-        FileTimestampRange range = getFileTimestampRange(file);
-        if (range.lastTimestamp.isBefore(fromTs)) {
-          left = mid + 1; // File is before our range, search right
-        } else {
-          right = mid - 1; // File is after our range, search left
-        }
-      }
-    }
-
-    return result;
-  }
-
-  private FileTimestampRange getFileTimestampRange(Path walFile) throws WALException {
-    try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
-      long fileSize = file.length();
-      if (fileSize == 0) return new FileTimestampRange(Instant.MAX, Instant.MIN);
-
-      // Read first page header
-      if (fileSize < WALPageHeader.HEADER_SIZE)
-        return new FileTimestampRange(Instant.MAX, Instant.MIN);
-      file.seek(0);
-      byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-      file.readFully(headerData);
-      WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
-
-      // Read last page header
-      long lastPageOffset = fileSize - PAGE_SIZE;
-      if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
-        file.seek(lastPageOffset);
-        file.readFully(headerData);
-        WALPageHeader lastHeader = WALPageHeader.deserialize(headerData);
-        return new FileTimestampRange(
-            firstHeader.getFirstTimestamp(), lastHeader.getLastTimestamp());
-      }
-
-      // Fallback: single page file
-      return new FileTimestampRange(
-          firstHeader.getFirstTimestamp(), firstHeader.getLastTimestamp());
-    } catch (Exception e) {
-      throw new WALException("Failed to get file timestamp range: " + walFile, e);
-    }
-  }
-
-  private static class FileTimestampRange {
-    final Instant firstTimestamp;
-    final Instant lastTimestamp;
-
-    FileTimestampRange(Instant firstTimestamp, Instant lastTimestamp) {
-      this.firstTimestamp = firstTimestamp;
-      this.lastTimestamp = lastTimestamp;
-    }
-  }
-
-  private List<Long> findOverlappingPagesBySequence(
-      RandomAccessFile file, long fileSize, long fromSeq, long toSeq)
-      throws IOException, WALException {
-    List<Long> pageOffsets = new ArrayList<>();
-
-    // Build list of all page offsets
-    for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += PAGE_SIZE) {
-      pageOffsets.add(offset);
-    }
-
-    if (pageOffsets.isEmpty()) {
-      return pageOffsets;
-    }
-
-    logger.debug("Binary searching {} pages for sequence overlapping ranges", pageOffsets.size());
-
-    // Use binary search to find first and last overlapping pages
-    int firstOverlapping = findFirstOverlappingPageBySequence(file, pageOffsets, fromSeq, toSeq);
-    if (firstOverlapping == -1) {
-      return new ArrayList<>(); // No overlapping pages found
-    }
-
-    int lastOverlapping =
-        findLastOverlappingPageBySequence(file, pageOffsets, fromSeq, toSeq, firstOverlapping);
-
-    List<Long> overlappingPages = new ArrayList<>();
-    for (int i = firstOverlapping; i <= lastOverlapping; i++) {
-      overlappingPages.add(pageOffsets.get(i));
-    }
-
-    return overlappingPages;
-  }
-
-  private int findFirstOverlappingPageBySequence(
-      RandomAccessFile file, List<Long> pageOffsets, long fromSeq, long toSeq)
-      throws IOException, WALException {
-    int left = 0, right = pageOffsets.size() - 1;
-    int result = -1;
-
-    while (left <= right) {
-      int mid = left + (right - left) / 2;
-      long offset = pageOffsets.get(mid);
-
-      PageSequenceRange range = getPageSequenceRange(file, offset);
-
-      if (pageOverlapsSequenceRange(range, fromSeq, toSeq)) {
-        result = mid;
-        right = mid - 1; // Continue searching left for first overlapping page
-      } else if (range.lastSequence < fromSeq) {
-        left = mid + 1; // Page is before our range, search right
-      } else {
-        right = mid - 1; // Page is after our range, search left
-      }
-    }
-
-    return result;
-  }
-
-  private int findLastOverlappingPageBySequence(
-      RandomAccessFile file, List<Long> pageOffsets, long fromSeq, long toSeq, int startFrom)
-      throws IOException, WALException {
-    int left = startFrom, right = pageOffsets.size() - 1;
-    int result = startFrom;
-
-    while (left <= right) {
-      int mid = left + (right - left) / 2;
-      long offset = pageOffsets.get(mid);
-
-      PageSequenceRange range = getPageSequenceRange(file, offset);
-
-      if (pageOverlapsSequenceRange(range, fromSeq, toSeq)) {
-        result = mid;
-        left = mid + 1; // Continue searching right for last overlapping page
-      } else if (range.lastSequence < fromSeq) {
-        left = mid + 1; // Page is before our range, search right
-      } else {
-        right = mid - 1; // Page is after our range, search left
-      }
-    }
-
-    return result;
-  }
-
-  private PageSequenceRange getPageSequenceRange(RandomAccessFile file, long offset)
-      throws IOException, WALException {
-    file.seek(offset);
-    byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-    file.readFully(headerData);
-    WALPageHeader header = WALPageHeader.deserialize(headerData);
-    return new PageSequenceRange(header.getFirstSequence(), header.getLastSequence());
-  }
-
-  private boolean pageOverlapsSequenceRange(PageSequenceRange pageRange, long fromSeq, long toSeq) {
-    return !(pageRange.lastSequence < fromSeq || pageRange.firstSequence > toSeq);
-  }
-
-  private static class PageSequenceRange {
-    final long firstSequence;
-    final long lastSequence;
-
-    PageSequenceRange(long firstSequence, long lastSequence) {
-      this.firstSequence = firstSequence;
-      this.lastSequence = lastSequence;
-    }
-  }
-
-  private List<Long> findOverlappingPagesByTimestamp(
-      RandomAccessFile file, long fileSize, Instant fromTs, Instant toTs)
-      throws IOException, WALException {
-    List<Long> pageOffsets = new ArrayList<>();
-
-    // Build list of all page offsets
-    for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += PAGE_SIZE) {
-      pageOffsets.add(offset);
-    }
-
-    if (pageOffsets.isEmpty()) {
-      return pageOffsets;
-    }
-
-    logger.debug("Binary searching {} pages for timestamp overlapping ranges", pageOffsets.size());
-
-    // Use binary search to find first and last overlapping pages
-    int firstOverlapping = findFirstOverlappingPageByTimestamp(file, pageOffsets, fromTs, toTs);
-    if (firstOverlapping == -1) {
-      return new ArrayList<>(); // No overlapping pages found
-    }
-
-    int lastOverlapping =
-        findLastOverlappingPageByTimestamp(file, pageOffsets, fromTs, toTs, firstOverlapping);
-
-    List<Long> overlappingPages = new ArrayList<>();
-    for (int i = firstOverlapping; i <= lastOverlapping; i++) {
-      overlappingPages.add(pageOffsets.get(i));
-    }
-
-    return overlappingPages;
-  }
-
-  private int findFirstOverlappingPageByTimestamp(
-      RandomAccessFile file, List<Long> pageOffsets, Instant fromTs, Instant toTs)
-      throws IOException, WALException {
-    int left = 0, right = pageOffsets.size() - 1;
-    int result = -1;
-
-    while (left <= right) {
-      int mid = left + (right - left) / 2;
-      long offset = pageOffsets.get(mid);
-
-      PageTimestampRange range = getPageTimestampRange(file, offset);
-
-      if (pageOverlapsTimestampRange(range, fromTs, toTs)) {
-        result = mid;
-        right = mid - 1; // Continue searching left for first overlapping page
-      } else if (range.lastTimestamp.isBefore(fromTs)) {
-        left = mid + 1; // Page is before our range, search right
-      } else {
-        right = mid - 1; // Page is after our range, search left
-      }
-    }
-
-    return result;
-  }
-
-  private int findLastOverlappingPageByTimestamp(
-      RandomAccessFile file, List<Long> pageOffsets, Instant fromTs, Instant toTs, int startFrom)
-      throws IOException, WALException {
-    int left = startFrom, right = pageOffsets.size() - 1;
-    int result = startFrom;
-
-    while (left <= right) {
-      int mid = left + (right - left) / 2;
-      long offset = pageOffsets.get(mid);
-
-      PageTimestampRange range = getPageTimestampRange(file, offset);
-
-      if (pageOverlapsTimestampRange(range, fromTs, toTs)) {
-        result = mid;
-        left = mid + 1; // Continue searching right for last overlapping page
-      } else if (range.lastTimestamp.isBefore(fromTs)) {
-        left = mid + 1; // Page is before our range, search right
-      } else {
-        right = mid - 1; // Page is after our range, search left
-      }
-    }
-
-    return result;
-  }
-
-  private PageTimestampRange getPageTimestampRange(RandomAccessFile file, long offset)
-      throws IOException, WALException {
-    file.seek(offset);
-    byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-    file.readFully(headerData);
-    WALPageHeader header = WALPageHeader.deserialize(headerData);
-    return new PageTimestampRange(header.getFirstTimestamp(), header.getLastTimestamp());
-  }
-
-  private boolean pageOverlapsTimestampRange(
-      PageTimestampRange pageRange, Instant fromTs, Instant toTs) {
-    return !(pageRange.lastTimestamp.isBefore(fromTs) || pageRange.firstTimestamp.isAfter(toTs));
-  }
-
-  private static class PageTimestampRange {
-    final Instant firstTimestamp;
-    final Instant lastTimestamp;
-
-    PageTimestampRange(Instant firstTimestamp, Instant lastTimestamp) {
-      this.firstTimestamp = firstTimestamp;
-      this.lastTimestamp = lastTimestamp;
-    }
-  }
-
-  private void emitEntriesFromFileByTimestamp(
-      FluxSink<WALEntry> sink, Path walFile, Instant fromTs, Instant toTs)
-      throws IOException, WALException {
-    logger.debug(
-        "Emitting entries from file: {} (timestamp range: {} to {})",
-        walFile.getFileName(),
-        fromTs,
-        toTs);
-
-    try (RandomAccessFile file = new RandomAccessFile(walFile.toFile(), "r")) {
-      long fileSize = file.length();
-
-      // Use binary search to find overlapping pages
-      List<Long> overlappingPageOffsets =
-          findOverlappingPagesByTimestamp(file, fileSize, fromTs, toTs);
-
-      // State for spanning entry reconstruction
-      ByteArrayOutputStream spanningEntryData = null;
-      long spanningEntrySequence = -1;
-
-      for (long currentPos : overlappingPageOffsets) {
-        if (sink.isCancelled()) break;
-
-        file.seek(currentPos);
-        byte[] headerData = new byte[WALPageHeader.HEADER_SIZE];
-        file.readFully(headerData);
-
-        try {
-          WALPageHeader header = WALPageHeader.deserialize(headerData);
-          metrics.incrementPagesScanned();
-
-          long pageEnd = Math.min(currentPos + PAGE_SIZE, fileSize);
-          long dataSize = pageEnd - currentPos - WALPageHeader.HEADER_SIZE;
-
-          if (header.isSpanningRecord()) {
-            // Handle spanning entry
-            if (header.isFirstPart()) {
-              // Start new spanning entry
-              spanningEntryData = new ByteArrayOutputStream();
-              spanningEntrySequence = header.getFirstSequence();
-            }
-
-            if (spanningEntryData != null) {
-              // Read page data
-              byte[] pageData = new byte[(int) dataSize];
-              file.seek(currentPos + WALPageHeader.HEADER_SIZE);
-              file.readFully(pageData);
-              spanningEntryData.write(pageData);
-              metrics.incrementPagesRead();
-
-              if (header.isLastPart()) {
-                // Complete spanning entry
-                byte[] completeEntryData = spanningEntryData.toByteArray();
-                WALEntry entry = WALEntry.deserialize(completeEntryData);
-
-                // Filter by timestamp range
-                if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
-                  sink.next(entry);
-                  metrics.incrementEntriesRead();
-                }
-
-                spanningEntryData = null;
-                spanningEntrySequence = -1;
-              }
-            }
-          } else {
-            // Handle regular page with complete entries
-            emitEntriesFromPageByTimestamp(
-                sink, file, currentPos + WALPageHeader.HEADER_SIZE, dataSize, fromTs, toTs);
-            metrics.incrementPagesRead();
-          }
-
-        } catch (WALException e) {
-          throw new WALException(
-              "Corrupted page at offset " + currentPos + ": " + e.getMessage(), e);
-        }
-      }
-    }
-  }
-
-  private void emitEntriesFromPageByTimestamp(
-      FluxSink<WALEntry> sink,
-      RandomAccessFile file,
-      long startOffset,
-      long dataSize,
-      Instant fromTs,
-      Instant toTs)
-      throws IOException, WALException {
-    file.seek(startOffset);
-    long endPos = startOffset + dataSize;
-    long currentPos = file.getFilePointer();
-
-    while (currentPos < endPos && currentPos < file.length() && !sink.isCancelled()) {
-      if (endPos - currentPos < ENTRY_HEADER_SIZE) break;
-
-      // Read entry header to get size
-      long entryStart = file.getFilePointer();
-      byte entryType = file.readByte();
-      if (entryType == 0) break; // Padding
-
-      file.readLong(); // sequence
-      file.readLong(); // timestamp
-      int dataLength = file.readInt();
-
-      if (dataLength < 0 || currentPos + ENTRY_HEADER_SIZE + dataLength > endPos) {
-        break; // Invalid entry
-      }
-
-      // Read complete entry data
-      int totalEntrySize = ENTRY_HEADER_SIZE + dataLength;
-      byte[] entryData = new byte[totalEntrySize];
-      file.seek(entryStart);
-      file.readFully(entryData);
-
-      try {
-        // Deserialize with CRC32 validation
-        WALEntry entry = WALEntry.deserialize(entryData);
-
-        // Filter by timestamp range
-        if (!entry.getTimestamp().isBefore(fromTs) && !entry.getTimestamp().isAfter(toTs)) {
-          sink.next(entry);
-          metrics.incrementEntriesRead();
-        }
-      } catch (WALException e) {
-        // Let CRC32 validation errors propagate, but log other deserialization issues
-        if (e.getMessage().contains("CRC32")) {
-          throw e; // Propagate CRC32 validation errors
-        } else {
-          // Skip entries that fail deserialization for other reasons
-          logger.debug(
-              "Skipping entry that failed deserialization at position {}: {}",
-              file.getFilePointer() - totalEntrySize,
-              e.getMessage());
-        }
-      }
-
-      currentPos = file.getFilePointer();
-    }
+    return readRange(RangeQuery.byTimestamp(fromTimestamp, toTimestamp));
   }
 
   @Override
