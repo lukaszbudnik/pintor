@@ -43,6 +43,7 @@ bin/
 # Exclude any sensitive or personal Q configurations
 .q/personal/
 .q/secrets/
+.q/
 
 # TODO
 todo.txt

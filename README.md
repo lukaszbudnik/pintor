@@ -153,12 +153,13 @@ Each page consists of a fixed-size header and a data section that contains the W
 |  |           Page Header (44 bytes)         |  |
 |  +------------------------------------------+  |
 |  |  Magic Number (4B)                       |  |
+|  |  Version (1B)                            |  |
 |  |  First Sequence (8B)                     |  |
 |  |  Last Sequence (8B)                      |  |
 |  |  First Timestamp (8B)                    |  |
 |  |  Last Timestamp (8B)                     |  |
 |  |  Entry Count (2B)                        |  |
-|  |  Continuation Flags (2B)                 |  |
+|  |  Continuation Flags (1B)                 |  |
 |  |  Header CRC32 (4B)                       |  |
 |  +------------------------------------------+  |
 |  |           Data Section (4052 bytes)      |  |
@@ -173,12 +174,13 @@ Each page consists of a fixed-size header and a data section that contains the W
 
 - **Page Header Fields (44 bytes)**:
   - Magic Number (4B) - `0xDEADBEEF` for validation
+  - Version (1B) - Storage format version, starting at 1
   - First Sequence (8B) - Lowest sequence number in page
   - Last Sequence (8B) - Highest sequence number in page
   - First Timestamp (8B) - Earliest entry timestamp milliseconds in page
   - Last Timestamp (8B) - Latest entry timestamp milliseconds in page
   - Entry Count (2B) - Number of entries in page
-  - Continuation Flags (2B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
+  - Continuation Flags (1B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
   - Header CRC32 (4B) - Validates header integrity
 - **Data Section (4052 bytes)** - Contains WAL entries or continuation data for entries spanning multiple pages (for more see: [Record Spanning Examples](#record-spanning-examples))
 - **Free Space** - Unused bytes at page end, occurs when:

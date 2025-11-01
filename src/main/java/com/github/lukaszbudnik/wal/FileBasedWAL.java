@@ -386,7 +386,7 @@ public class FileBasedWAL implements WriteAheadLog {
       currentPageLastTimestamp = entry.getTimestamp();
 
       // Determine continuation flags and entry count
-      short continuationFlags;
+      byte continuationFlags;
       if (isFirstPage) {
         continuationFlags =
             (bytesWritten >= totalBytes) ? WALPageHeader.NO_CONTINUATION : WALPageHeader.FIRST_PART;
@@ -416,7 +416,7 @@ public class FileBasedWAL implements WriteAheadLog {
   }
 
   /** Flush current page buffer to disk with specified continuation flags. */
-  private void flushCurrentPageWithFlags(short continuationFlags) throws IOException, WALException {
+  private void flushCurrentPageWithFlags(byte continuationFlags) throws IOException, WALException {
     if (currentPageBuffer == null || currentPageBuffer.position() <= WALPageHeader.HEADER_SIZE) {
       logger.debug("No data to flush in current page");
       return; // No data to flush
@@ -428,9 +428,12 @@ public class FileBasedWAL implements WriteAheadLog {
 
     WALPageHeader header =
         new WALPageHeader(
-            currentPageFirstSequence, currentPageLastSequence,
-            firstTs, lastTs,
-            currentPageEntryCount, continuationFlags);
+            currentPageFirstSequence,
+            currentPageLastSequence,
+            firstTs,
+            lastTs,
+            currentPageEntryCount,
+            continuationFlags);
 
     logger.debug(
         "Flushing page to disk: seq={}-{}, entries={}, dataSize={} bytes, flags={}",
@@ -691,7 +694,7 @@ public class FileBasedWAL implements WriteAheadLog {
                 firstHeader.getFirstTimestamp(),
                 lastHeader.getLastTimestamp(),
                 (short) 0,
-                (short) 0);
+                (byte) 0);
         return query.headerOverlapsRange(combinedHeader);
       }
 
@@ -713,7 +716,6 @@ public class FileBasedWAL implements WriteAheadLog {
       long fileSize = file.length();
 
       ByteArrayOutputStream spanningEntryData = null;
-      long spanningEntrySequence = -1;
 
       for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += PAGE_SIZE) {
         if (sink.isCancelled()) break;
@@ -732,7 +734,6 @@ public class FileBasedWAL implements WriteAheadLog {
           if (header.isSpanningRecord()) {
             if (header.isFirstPart()) {
               spanningEntryData = new ByteArrayOutputStream();
-              spanningEntrySequence = header.getFirstSequence();
             }
 
             if (spanningEntryData != null) {
@@ -757,7 +758,6 @@ public class FileBasedWAL implements WriteAheadLog {
                 }
 
                 spanningEntryData = null;
-                spanningEntrySequence = -1;
               }
             }
           } else {

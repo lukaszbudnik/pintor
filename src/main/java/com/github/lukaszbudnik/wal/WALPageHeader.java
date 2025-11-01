@@ -9,22 +9,24 @@ import java.util.zip.CRC32;
  * 44-byte header.
  */
 class WALPageHeader {
-  static final int HEADER_SIZE = 44; // 4+8+8+8+8+2+2+4 = 44 bytes
+  static final int HEADER_SIZE = 44; // 4+1+8+8+8+8+2+1+4 = 44 bytes
   static final int MAGIC_NUMBER = 0xDEADBEEF;
+  static final byte STORAGE_FORMAT_VERSION = 1;
 
   // Continuation flags
-  static final short NO_CONTINUATION = 0;
-  static final short FIRST_PART = 1;
-  static final short MIDDLE_PART = 2;
-  static final short LAST_PART = 4;
+  static final byte NO_CONTINUATION = 0;
+  static final byte FIRST_PART = 1;
+  static final byte MIDDLE_PART = 2;
+  static final byte LAST_PART = 4;
 
   private final int magicNumber;
+  private final byte version;
   private final long firstSequence;
   private final long lastSequence;
   private final long firstTimestampMillis;
   private final long lastTimestampMillis;
   private final short entryCount;
-  private final short continuationFlags;
+  private final byte continuationFlags;
   private final int headerCRC;
 
   WALPageHeader(
@@ -33,8 +35,9 @@ class WALPageHeader {
       Instant firstTimestamp,
       Instant lastTimestamp,
       short entryCount,
-      short continuationFlags) {
+      byte continuationFlags) {
     this.magicNumber = MAGIC_NUMBER;
+    this.version = STORAGE_FORMAT_VERSION;
     this.firstSequence = firstSequence;
     this.lastSequence = lastSequence;
     this.firstTimestampMillis = firstTimestamp.toEpochMilli();
@@ -46,14 +49,16 @@ class WALPageHeader {
 
   private WALPageHeader(
       int magicNumber,
+      byte version,
       long firstSequence,
       long lastSequence,
       long firstTimestampMillis,
       long lastTimestampMillis,
       short entryCount,
-      short continuationFlags,
+      byte continuationFlags,
       int headerCRC) {
     this.magicNumber = magicNumber;
+    this.version = version;
     this.firstSequence = firstSequence;
     this.lastSequence = lastSequence;
     this.firstTimestampMillis = firstTimestampMillis;
@@ -66,12 +71,13 @@ class WALPageHeader {
   private int calculateHeaderCRC() {
     ByteBuffer buffer = ByteBuffer.allocate(40); // Header size (44) minus CRC (4) = 40
     buffer.putInt(magicNumber);
+    buffer.put(version);
     buffer.putLong(firstSequence);
     buffer.putLong(lastSequence);
     buffer.putLong(firstTimestampMillis);
     buffer.putLong(lastTimestampMillis);
     buffer.putShort(entryCount);
-    buffer.putShort(continuationFlags);
+    buffer.put(continuationFlags);
 
     CRC32 crc = new CRC32();
     crc.update(buffer.array());
@@ -81,12 +87,13 @@ class WALPageHeader {
   byte[] serialize() {
     ByteBuffer buffer = ByteBuffer.allocate(HEADER_SIZE);
     buffer.putInt(magicNumber);
+    buffer.put(version);
     buffer.putLong(firstSequence);
     buffer.putLong(lastSequence);
     buffer.putLong(firstTimestampMillis);
     buffer.putLong(lastTimestampMillis);
     buffer.putShort(entryCount);
-    buffer.putShort(continuationFlags);
+    buffer.put(continuationFlags);
     buffer.putInt(headerCRC);
     return buffer.array();
   }
@@ -98,17 +105,19 @@ class WALPageHeader {
 
     ByteBuffer buffer = ByteBuffer.wrap(data);
     int magicNumber = buffer.getInt();
+    byte version = buffer.get();
     long firstSequence = buffer.getLong();
     long lastSequence = buffer.getLong();
     long firstTimestampMillis = buffer.getLong();
     long lastTimestampMillis = buffer.getLong();
     short entryCount = buffer.getShort();
-    short continuationFlags = buffer.getShort();
+    byte continuationFlags = buffer.get();
     int headerCRC = buffer.getInt();
 
     WALPageHeader header =
         new WALPageHeader(
             magicNumber,
+            version,
             firstSequence,
             lastSequence,
             firstTimestampMillis,
@@ -129,6 +138,10 @@ class WALPageHeader {
   }
 
   // Getters
+  byte getVersion() {
+    return version;
+  }
+
   long getFirstSequence() {
     return firstSequence;
   }
@@ -149,7 +162,7 @@ class WALPageHeader {
     return entryCount;
   }
 
-  short getContinuationFlags() {
+  byte getContinuationFlags() {
     return continuationFlags;
   }
 
