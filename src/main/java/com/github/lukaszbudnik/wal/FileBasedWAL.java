@@ -716,7 +716,6 @@ public class FileBasedWAL implements WriteAheadLog {
       long fileSize = file.length();
 
       ByteArrayOutputStream spanningEntryData = null;
-      //      long spanningEntrySequence = -1;
 
       for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += PAGE_SIZE) {
         if (sink.isCancelled()) break;
@@ -735,7 +734,6 @@ public class FileBasedWAL implements WriteAheadLog {
           if (header.isSpanningRecord()) {
             if (header.isFirstPart()) {
               spanningEntryData = new ByteArrayOutputStream();
-              //              spanningEntrySequence = header.getFirstSequence();
             }
 
             if (spanningEntryData != null) {
@@ -760,7 +758,6 @@ public class FileBasedWAL implements WriteAheadLog {
                 }
 
                 spanningEntryData = null;
-                //                spanningEntrySequence = -1;
               }
             }
           } else {
