@@ -16,6 +16,7 @@ class WALPageHeaderTest {
         new WALPageHeader(100L, 200L, now, later, (short) 5, WALPageHeader.NO_CONTINUATION);
 
     // Test getters
+    assertEquals(WALPageHeader.STORAGE_FORMAT_VERSION, header.getVersion());
     assertEquals(100L, header.getFirstSequence());
     assertEquals(200L, header.getLastSequence());
     assertEquals(now.toEpochMilli(), header.getFirstTimestamp().toEpochMilli());
@@ -29,6 +30,7 @@ class WALPageHeaderTest {
     assertEquals(44, serialized.length); // Verify correct header size
 
     WALPageHeader deserialized = WALPageHeader.deserialize(serialized);
+    assertEquals(header.getVersion(), deserialized.getVersion());
     assertEquals(header.getFirstSequence(), deserialized.getFirstSequence());
     assertEquals(header.getLastSequence(), deserialized.getLastSequence());
     assertEquals(
