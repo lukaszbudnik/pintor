@@ -34,15 +34,21 @@ jacoco {
 }
 
 dependencies {
-    implementation("org.slf4j:slf4j-api:2.0.17")
-    implementation("io.projectreactor:reactor-core:3.7.12")
+    val reactorVersion = "3.7.12"
+    val mockitoVersion = "5.20.0"
+    val junitVersion = "6.0.1"
+    val slf4jVersion = "2.0.17"
+    val logbackVersion = "1.5.20"
 
-    testImplementation("org.junit.jupiter:junit-jupiter:6.0.1")
+    implementation("org.slf4j:slf4j-api:$slf4jVersion")
+    implementation("io.projectreactor:reactor-core:$reactorVersion")
+
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    testImplementation("org.mockito:mockito-core:5.20.0")
-    testImplementation("org.mockito:mockito-junit-jupiter:5.20.0")
-    testImplementation("ch.qos.logback:logback-classic:1.5.20")
-    testImplementation("io.projectreactor:reactor-test:3.7.12")
+    testImplementation("org.junit.jupiter:junit-jupiter:$junitVersion")
+    testImplementation("org.mockito:mockito-core:$mockitoVersion")
+    testImplementation("org.mockito:mockito-junit-jupiter:$mockitoVersion")
+    testImplementation("ch.qos.logback:logback-classic:$logbackVersion")
+    testImplementation("io.projectreactor:reactor-test:$reactorVersion")
 }
 
 tasks.test {
