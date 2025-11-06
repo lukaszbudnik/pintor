@@ -15,21 +15,20 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 
 /**
- * File-based implementation of Write Ahead Log using 4KB pages. Provides O(1) recovery and
- * professional-grade record spanning.
+ * File-based implementation of Write Ahead Log using configurable page sizes (4KB, 8KB, 16KB, 32KB,
+ * or 64KB). Provides O(1) recovery and professional-grade record spanning.
  */
 public class FileBasedWAL implements WriteAheadLog {
   private static final Logger logger = LoggerFactory.getLogger(FileBasedWAL.class);
 
   // Page constants
-  static final int PAGE_SIZE = 4096; // 4KB pages
-  static final int PAGE_DATA_SIZE = PAGE_SIZE - WALPageHeader.HEADER_SIZE; // 4052 bytes
   static final int ENTRY_HEADER_SIZE = 25; // 1+8+8+4+4 bytes
 
   // File constants
   private static final String WAL_FILE_PREFIX = "wal-";
   private static final String WAL_FILE_SUFFIX = ".log";
   private static final int DEFAULT_MAX_FILE_SIZE = 64 * 1024 * 1024; // 64MB
+  private static final byte DEFAULT_PAGE_SIZE_KB = 8; // 8KB pages
 
   // Entry types
   static final byte DATA_ENTRY = 1;
@@ -37,6 +36,9 @@ public class FileBasedWAL implements WriteAheadLog {
 
   private final Path walDirectory;
   private final int maxFileSize;
+  private final byte pageSizeKB;
+  private final int pageSize;
+  private final int pageDataSize;
   private final ReadWriteLock lock = new ReentrantReadWriteLock();
   private final Map<Integer, Path> walFiles = new TreeMap<>();
   private final WALMetrics metrics = new WALMetrics();
@@ -54,15 +56,22 @@ public class FileBasedWAL implements WriteAheadLog {
   private short currentPageEntryCount = 0;
 
   public FileBasedWAL(Path walDirectory) throws WALException {
-    this(walDirectory, DEFAULT_MAX_FILE_SIZE);
+    this(walDirectory, DEFAULT_MAX_FILE_SIZE, DEFAULT_PAGE_SIZE_KB);
   }
 
-  public FileBasedWAL(Path walDirectory, int maxFileSize) throws WALException {
+  public FileBasedWAL(Path walDirectory, int maxFileSize, byte pageSizeKB) throws WALException {
+    validatePageSize(pageSizeKB);
     this.walDirectory = walDirectory;
     this.maxFileSize = maxFileSize;
+    this.pageSizeKB = pageSizeKB;
+    this.pageSize = pageSizeKB * 1024;
+    this.pageDataSize = pageSize - WALPageHeader.HEADER_SIZE;
 
     logger.info(
-        "Initializing FileBasedWAL: directory={}, maxFileSize={} bytes", walDirectory, maxFileSize);
+        "Initializing FileBasedWAL: directory={}, maxFileSize={} bytes, pageSize={}KB",
+        walDirectory,
+        maxFileSize,
+        pageSizeKB);
 
     try {
       Files.createDirectories(walDirectory);
@@ -75,6 +84,17 @@ public class FileBasedWAL implements WriteAheadLog {
     } catch (IOException e) {
       logger.error("Failed to initialize WAL in directory {}: {}", walDirectory, e.getMessage(), e);
       throw new WALException("Failed to initialize WAL", e);
+    }
+  }
+
+  private static void validatePageSize(byte pageSizeKB) throws WALException {
+    if (pageSizeKB != 4
+        && pageSizeKB != 8
+        && pageSizeKB != 16
+        && pageSizeKB != 32
+        && pageSizeKB != 64) {
+      throw new WALException(
+          "Invalid page size: " + pageSizeKB + "KB. Valid sizes are: 4, 8, 16, 32, 64");
     }
   }
 
@@ -147,9 +167,9 @@ public class FileBasedWAL implements WriteAheadLog {
       }
 
       // Check if file is page-aligned and try O(1) recovery
-      if (fileSize % PAGE_SIZE == 0 && fileSize >= PAGE_SIZE) {
+      if (fileSize % pageSize == 0 && fileSize >= pageSize) {
         try {
-          long lastPagePosition = fileSize - PAGE_SIZE;
+          long lastPagePosition = fileSize - pageSize;
           logger.debug("Reading last page header at position: {}", lastPagePosition);
           file.seek(lastPagePosition);
 
@@ -157,6 +177,18 @@ public class FileBasedWAL implements WriteAheadLog {
           file.readFully(headerData);
 
           WALPageHeader header = WALPageHeader.deserialize(headerData);
+
+          // Validate page size matches
+          if (header.getPageSizeKB() != pageSizeKB) {
+            throw new WALException(
+                "Page size mismatch: WAL file has "
+                    + header.getPageSizeKB()
+                    + "KB pages, "
+                    + "but FileBasedWAL configured for "
+                    + pageSizeKB
+                    + "KB pages");
+          }
+
           logger.debug(
               "Last page header: firstSeq={}, lastSeq={}, entryCount={}",
               header.getFirstSequence(),
@@ -173,9 +205,7 @@ public class FileBasedWAL implements WriteAheadLog {
         }
       } else {
         logger.error(
-            "WAL file error: File is not page-aligned. Size: {}, PAGE_SIZE: {}",
-            fileSize,
-            PAGE_SIZE);
+            "WAL file error: File is not page-aligned. Size: {}, pageSize: {}", fileSize, pageSize);
         throw new WALException("WAL file error: File is not page-aligned.");
       }
     }
@@ -212,7 +242,7 @@ public class FileBasedWAL implements WriteAheadLog {
   }
 
   private void initializeNewPage() {
-    currentPageBuffer = ByteBuffer.allocate(PAGE_SIZE);
+    currentPageBuffer = ByteBuffer.allocate(pageSize);
     currentPageBuffer.position(WALPageHeader.HEADER_SIZE); // Reserve space for header
     currentPageFirstSequence = -1;
     currentPageLastSequence = -1;
@@ -220,9 +250,7 @@ public class FileBasedWAL implements WriteAheadLog {
     currentPageLastTimestamp = null;
     currentPageEntryCount = 0;
 
-    logger.debug(
-        "Initialized new page buffer: available space={} bytes",
-        PAGE_SIZE - WALPageHeader.HEADER_SIZE);
+    logger.debug("Initialized new page buffer: available space={} bytes", pageDataSize);
   }
 
   @Override
@@ -301,7 +329,7 @@ public class FileBasedWAL implements WriteAheadLog {
     if (currentPageBuffer.remaining() >= entrySize) {
       // Entry fits in current page - simple case
       writeEntryToCurrentPage(entry, serializedEntry);
-    } else if (entrySize <= PAGE_DATA_SIZE) {
+    } else if (entrySize <= pageDataSize) {
       // Entry doesn't fit in current page but fits in a single page
       // Flush current page and write to new page
       if (currentPageBuffer.position() > WALPageHeader.HEADER_SIZE) {
@@ -433,7 +461,8 @@ public class FileBasedWAL implements WriteAheadLog {
             firstTs,
             lastTs,
             currentPageEntryCount,
-            continuationFlags);
+            continuationFlags,
+            pageSizeKB);
 
     logger.debug(
         "Flushing page to disk: seq={}-{}, entries={}, dataSize={} bytes, flags={}",
@@ -681,7 +710,7 @@ public class FileBasedWAL implements WriteAheadLog {
       file.readFully(headerData);
       WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
 
-      long lastPageOffset = fileSize - PAGE_SIZE;
+      long lastPageOffset = fileSize - pageSize;
       if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
         file.seek(lastPageOffset);
         file.readFully(headerData);
@@ -694,7 +723,8 @@ public class FileBasedWAL implements WriteAheadLog {
                 firstHeader.getFirstTimestamp(),
                 lastHeader.getLastTimestamp(),
                 (short) 0,
-                (byte) 0);
+                (byte) 0,
+                firstHeader.getPageSizeKB());
         return query.headerOverlapsRange(combinedHeader);
       }
 
@@ -717,7 +747,7 @@ public class FileBasedWAL implements WriteAheadLog {
 
       ByteArrayOutputStream spanningEntryData = null;
 
-      for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += PAGE_SIZE) {
+      for (long offset = 0; offset + WALPageHeader.HEADER_SIZE <= fileSize; offset += pageSize) {
         if (sink.isCancelled()) break;
 
         file.seek(offset);
@@ -728,7 +758,7 @@ public class FileBasedWAL implements WriteAheadLog {
           WALPageHeader header = WALPageHeader.deserialize(headerData);
           metrics.incrementPagesScanned();
 
-          long pageEnd = Math.min(offset + PAGE_SIZE, fileSize);
+          long pageEnd = Math.min(offset + pageSize, fileSize);
           long dataSize = pageEnd - offset - WALPageHeader.HEADER_SIZE;
 
           if (header.isSpanningRecord()) {
@@ -851,7 +881,7 @@ public class FileBasedWAL implements WriteAheadLog {
       file.readFully(headerData);
       WALPageHeader firstHeader = WALPageHeader.deserialize(headerData);
 
-      long lastPageOffset = fileSize - PAGE_SIZE;
+      long lastPageOffset = fileSize - pageSize;
       if (lastPageOffset + WALPageHeader.HEADER_SIZE <= fileSize) {
         file.seek(lastPageOffset);
         file.readFully(headerData);

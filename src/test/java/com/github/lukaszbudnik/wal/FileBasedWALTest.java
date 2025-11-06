@@ -46,7 +46,7 @@ class FileBasedWALTest {
     defaultWal.close();
 
     // Test constructor with custom parameters
-    FileBasedWAL customWal = new FileBasedWAL(tempDir, 1024 * 1024); // 1MB
+    FileBasedWAL customWal = new FileBasedWAL(tempDir, 1024 * 1024, (byte) 4); // 1MB
     assertNotNull(customWal);
 
     // Test that it works with custom settings
@@ -297,8 +297,7 @@ class FileBasedWALTest {
     wal.close();
 
     // Create WAL with very small file size to force rotation
-    FileBasedWAL smallWal =
-        new FileBasedWAL(tempDir, FileBasedWAL.PAGE_SIZE); // page size max file size
+    FileBasedWAL smallWal = new FileBasedWAL(tempDir, 4096, (byte) 4); // 4KB max file size
 
     try {
       // Add entries that will exceed the file size limit
@@ -331,7 +330,7 @@ class FileBasedWALTest {
     // Create WAL with very small file size to force rotation
     wal.close();
 
-    wal = new FileBasedWAL(tempDir, FileBasedWAL.PAGE_SIZE);
+    wal = new FileBasedWAL(tempDir, 4096, (byte) 4);
 
     // Add a thousand entries
     String[] testData = new String[1000];
@@ -628,7 +627,7 @@ class FileBasedWALTest {
   void testTimestampBasedReadingAcrossFiles() throws Exception {
     // Use a small file size to force rotation - FileBasedWAL.PAGE_SIZE
     try (FileBasedWAL smallWal =
-        new FileBasedWAL(tempDir.resolve("small_timestamp"), FileBasedWAL.PAGE_SIZE)) {
+        new FileBasedWAL(tempDir.resolve("small_timestamp"), 4096, (byte) 4)) {
       Instant startTime = Instant.now();
 
       // Add enough entries to trigger file rotation
@@ -742,11 +741,11 @@ class FileBasedWALTest {
   @Test
   void testExactPageSizeEntry() throws WALException {
     // Create an entry that exactly fills the entire page data section
-    // Page data size: 4052 bytes
+    // Page data size: 8147 bytes (8192 - 45 header)
     // Entry overhead: 25 bytes (1+8+8+4+4)
-    // So data should be: 4052 - 25 = 4027 bytes
+    // So data should be: 8147 - 25 = 8122 bytes
 
-    byte[] exactPageData = new byte[4027];
+    byte[] exactPageData = new byte[8122];
     for (int i = 0; i < exactPageData.length; i++) {
       exactPageData[i] = (byte) (i % 256);
     }
@@ -763,7 +762,7 @@ class FileBasedWALTest {
 
     // Verify data integrity
     byte[] readData = readEntries.get(0).getDataAsBytes();
-    assertEquals(4027, readData.length);
+    assertEquals(8122, readData.length);
     for (int i = 0; i < readData.length; i++) {
       assertEquals((byte) (i % 256), readData[i], "Data mismatch at position " + i);
     }
@@ -772,11 +771,11 @@ class FileBasedWALTest {
   @Test
   void testExactPageSizeEntryByTimestamp() throws WALException, java.io.IOException {
     // Create an entry that exactly fills the entire page data section
-    // Page data size: 4052 bytes
+    // Page data size: 8147 bytes (8192 - 45 header)
     // Entry overhead: 25 bytes (1+8+8+4+4)
-    // So data should be: 4052 - 25 = 4027 bytes
+    // So data should be: 8147 - 25 = 8122 bytes
 
-    byte[] exactPageData = new byte[4027];
+    byte[] exactPageData = new byte[8122];
     for (int i = 0; i < exactPageData.length; i++) {
       exactPageData[i] = (byte) (i % 256);
     }
@@ -797,7 +796,7 @@ class FileBasedWALTest {
 
     // Verify data integrity
     byte[] readData = readEntries.get(0).getDataAsBytes();
-    assertEquals(4027, readData.length);
+    assertEquals(8122, readData.length);
     for (int i = 0; i < readData.length; i++) {
       assertEquals((byte) (i % 256), readData[i], "Data mismatch at position " + i);
     }

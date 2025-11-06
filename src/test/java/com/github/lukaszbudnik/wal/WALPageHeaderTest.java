@@ -13,7 +13,8 @@ class WALPageHeaderTest {
     Instant later = now.plusSeconds(10).plusMillis(123);
 
     WALPageHeader header =
-        new WALPageHeader(100L, 200L, now, later, (short) 5, WALPageHeader.NO_CONTINUATION);
+        new WALPageHeader(
+            100L, 200L, now, later, (short) 5, WALPageHeader.NO_CONTINUATION, (byte) 4);
 
     // Test getters
     assertEquals(WALPageHeader.STORAGE_FORMAT_VERSION, header.getVersion());
@@ -27,7 +28,7 @@ class WALPageHeaderTest {
     // Test serialization/deserialization
     byte[] serialized = header.serialize();
     assertEquals(WALPageHeader.HEADER_SIZE, serialized.length);
-    assertEquals(44, serialized.length); // Verify correct header size
+    assertEquals(45, serialized.length); // Verify correct header size
 
     WALPageHeader deserialized = WALPageHeader.deserialize(serialized);
     assertEquals(header.getVersion(), deserialized.getVersion());
@@ -47,7 +48,8 @@ class WALPageHeaderTest {
     Instant precise = Instant.ofEpochMilli(1693123456987L);
 
     WALPageHeader header =
-        new WALPageHeader(1L, 1L, precise, precise, (short) 1, WALPageHeader.NO_CONTINUATION);
+        new WALPageHeader(
+            1L, 1L, precise, precise, (short) 1, WALPageHeader.NO_CONTINUATION, (byte) 4);
 
     byte[] serialized = header.serialize();
     WALPageHeader deserialized = WALPageHeader.deserialize(serialized);
@@ -63,7 +65,7 @@ class WALPageHeaderTest {
 
     // Test NO_CONTINUATION
     WALPageHeader noSpan =
-        new WALPageHeader(1L, 1L, now, now, (short) 1, WALPageHeader.NO_CONTINUATION);
+        new WALPageHeader(1L, 1L, now, now, (short) 1, WALPageHeader.NO_CONTINUATION, (byte) 4);
     assertFalse(noSpan.isSpanningRecord());
     assertFalse(noSpan.isFirstPart());
     assertFalse(noSpan.isMiddlePart());
@@ -71,7 +73,7 @@ class WALPageHeaderTest {
 
     // Test FIRST_PART
     WALPageHeader firstPart =
-        new WALPageHeader(1L, 1L, now, now, (short) 1, WALPageHeader.FIRST_PART);
+        new WALPageHeader(1L, 1L, now, now, (short) 1, WALPageHeader.FIRST_PART, (byte) 4);
     assertTrue(firstPart.isSpanningRecord());
     assertTrue(firstPart.isFirstPart());
     assertFalse(firstPart.isMiddlePart());
@@ -79,7 +81,7 @@ class WALPageHeaderTest {
 
     // Test MIDDLE_PART
     WALPageHeader middlePart =
-        new WALPageHeader(1L, 1L, now, now, (short) 0, WALPageHeader.MIDDLE_PART);
+        new WALPageHeader(1L, 1L, now, now, (short) 0, WALPageHeader.MIDDLE_PART, (byte) 4);
     assertTrue(middlePart.isSpanningRecord());
     assertFalse(middlePart.isFirstPart());
     assertTrue(middlePart.isMiddlePart());
@@ -87,7 +89,7 @@ class WALPageHeaderTest {
 
     // Test LAST_PART
     WALPageHeader lastPart =
-        new WALPageHeader(1L, 1L, now, now, (short) 0, WALPageHeader.LAST_PART);
+        new WALPageHeader(1L, 1L, now, now, (short) 0, WALPageHeader.LAST_PART, (byte) 4);
     assertTrue(lastPart.isSpanningRecord());
     assertFalse(lastPart.isFirstPart());
     assertFalse(lastPart.isMiddlePart());
@@ -125,7 +127,7 @@ class WALPageHeaderTest {
   void testHeaderCRCValidation() throws WALException {
     Instant now = Instant.now();
     WALPageHeader header =
-        new WALPageHeader(1L, 1L, now, now, (short) 1, WALPageHeader.NO_CONTINUATION);
+        new WALPageHeader(1L, 1L, now, now, (short) 1, WALPageHeader.NO_CONTINUATION, (byte) 4);
 
     byte[] serialized = header.serialize();
 
@@ -149,6 +151,6 @@ class WALPageHeaderTest {
 
   @Test
   void testHeaderSizeConstant() {
-    assertEquals(44, WALPageHeader.HEADER_SIZE);
+    assertEquals(45, WALPageHeader.HEADER_SIZE);
   }
 }

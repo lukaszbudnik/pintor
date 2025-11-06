@@ -25,7 +25,7 @@ class PointInTimeRecoverySequenceTest {
   @BeforeEach
   void setUp() throws WALException {
     // use small max file size to force file rotations
-    wal = new FileBasedWAL(tempDir, FileBasedWAL.PAGE_SIZE);
+    wal = new FileBasedWAL(tempDir, 4096, (byte) 4); // 4KB files, 4KB pages
   }
 
   @AfterEach
@@ -169,7 +169,7 @@ class PointInTimeRecoverySequenceTest {
   @Test
   void testSequenceBasedRecoveryAcrossFiles() throws WALException {
     // Use a small file size to force rotation and test cross-file recovery
-    try (FileBasedWAL smallWal = new FileBasedWAL(tempDir.resolve("small_seq"), 1024)) {
+    try (FileBasedWAL smallWal = new FileBasedWAL(tempDir.resolve("small_seq"), 1024, (byte) 4)) {
 
       // Add enough entries to trigger file rotation
       for (int i = 0; i < 20; i++) {
