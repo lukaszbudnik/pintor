@@ -125,32 +125,32 @@ try (WriteAheadLog wal = new FileBasedWAL(walDir)) {
 
 #### WAL Log Files: `wal-{index}.log`
 
-A WAL file, such as `wal-0.log`, is a collection of fixed-size 4KB pages. The file grows as new data is written, and a new file is created (rotated) when the size limit is reached (default: 64MB).
+A WAL file, such as `wal-0.log`, is a collection of fixed-size pages. Page size is configurable (4KB, 8KB, 16KB, 32KB, or 64KB) with 8KB as the default. The file grows as new data is written, and a new file is created (rotated) when the size limit is reached (default: 64MB).
 
 ```
-+----------------------+
-|      wal-0.log       |
-+----------------------+
-|   WAL Page 1 (4KB)   |
-+----------------------+
-|   WAL Page 2 (4KB)   |
-+----------------------+
-|         ...          |
-+----------------------+
-|   WAL Page N (4KB)   |
-+----------------------+
++-------------------------------------------------+
+|                    wal-0.log                    |
++-------------------------------------------------+
+|   WAL Page 1 (configurable size, default 8KB)   |
++-------------------------------------------------+
+|   WAL Page 2 (configurable size, default 8KB)   |
++-------------------------------------------------+
+|                       ...                       |
++-------------------------------------------------+
+|   WAL Page N (configurable size, default 8KB)   |
++-------------------------------------------------+
 ```
 
 #### Page Structure
 
-Each page consists of a fixed-size header and a data section that contains the WAL entries.
+Each page consists of a fixed-size header and a data section that contains the WAL entries. Page size is configurable (4KB, 8KB, 16KB, 32KB, or 64KB) with 8KB as the default.
 
 ```
 +------------------------------------------------+
-|          WAL Page (4096 bytes)                 |
+|          WAL Page (configurable size)          |
 +------------------------------------------------+
 |  +------------------------------------------+  |
-|  |           Page Header (44 bytes)         |  |
+|  |           Page Header (45 bytes)         |  |
 |  +------------------------------------------+  |
 |  |  Magic Number (4B)                       |  |
 |  |  Version (1B)                            |  |
@@ -160,9 +160,10 @@ Each page consists of a fixed-size header and a data section that contains the W
 |  |  Last Timestamp (8B)                     |  |
 |  |  Entry Count (2B)                        |  |
 |  |  Continuation Flags (1B)                 |  |
+|  |  Page Size KB (1B)                       |  |
 |  |  Header CRC32 (4B)                       |  |
 |  +------------------------------------------+  |
-|  |           Data Section (4052 bytes)      |  |
+|  |           Data Section (page_size - 45)  |  |
 |  +------------------------------------------+  |
 |  |  WAL Entry 1 (Variable Length)           |  |
 |  |  WAL Entry 2 (Variable Length)           |  |
@@ -172,7 +173,7 @@ Each page consists of a fixed-size header and a data section that contains the W
 +------------------------------------------------+
 ```
 
-- **Page Header Fields (44 bytes)**:
+- **Page Header Fields (45 bytes)**:
   - Magic Number (4B) - `0xDEADBEEF` for validation
   - Version (1B) - Storage format version, starting at 1
   - First Sequence (8B) - Lowest sequence number in page
@@ -181,8 +182,9 @@ Each page consists of a fixed-size header and a data section that contains the W
   - Last Timestamp (8B) - Latest entry timestamp milliseconds in page
   - Entry Count (2B) - Number of entries in page
   - Continuation Flags (1B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
+  - Page Size KB (1B) - Page size in KB (4, 8, 16, 32, or 64)
   - Header CRC32 (4B) - Validates header integrity
-- **Data Section (4052 bytes)** - Contains WAL entries or continuation data for entries spanning multiple pages (for more see: [Record Spanning Examples](#record-spanning-examples))
+- **Data Section (page_size - 45 bytes)** - Contains WAL entries or continuation data for entries spanning multiple pages (for more see: [Record Spanning Examples](#record-spanning-examples))
 - **Free Space** - Unused bytes at page end, occurs when:
   - Page is flushed before completely full by either manual sync or read operations (for more see: [Page Flushing to Disk](#page-flushing-to-disk))
   - Next entry is too large to fit in remaining space
@@ -199,17 +201,21 @@ Entries are stored sequentially in the data section of a page. An entry is compo
 - CRC32 (4B)
 
 ```
-+------------------------------------------------+
-|           WAL Entry (Variable Length)          |
-+------------------------------------------------+
-|  Entry Type (1B)     |  Sequence Number (8B)   |
-+------------------------------------------------+
-|  Timestamp (8B)      |  Data Length (4B)       |
-+------------------------------------------------+
-|             Data (Variable Length)             |
-+------------------------------------------------+
-|                   CRC32 (4B)                   |
-+------------------------------------------------+
++------------------------------------+
+|    WAL Entry (Variable Length)     |
++------------------------------------+
+|  Entry Type (1B)                   |
++------------------------------------+     
+|  Sequence Number (8B)              |
++------------------------------------+
+|  Timestamp (8B)                    |
++------------------------------------+
+|  Data Length (4B)                  |
++------------------------------------+
+|  Data (Variable Length)            |
++------------------------------------+
+|  CRC32 (4B)                        |
++------------------------------------+
 ```
 
 ### Page Flushing to Disk
@@ -223,16 +229,16 @@ Pages and WAL entries are buffered in memory and written to disk when any of the
 
 ### Record Spanning Examples
 
-**Page Structure**: Each page is 4096 bytes with a 44-byte header, leaving 4052 bytes for data. Each entry has 25-byte header and a variable length data.
+**Page Structure**: Each page is 4096 bytes with a 45-byte header, leaving 4051 bytes for data. Each entry has 25-byte header and a variable length data.
 
 **Multiple Small Entries (fit in one page):**
 
 ```
-Page 1 (4096 bytes): [Header: 44 bytes, flags=0, seq=101-103]
+Page 1 (4096 bytes): [Header: 45 bytes, flags=0, seq=101-103]
   Entry 101: 175 bytes (25 byte header + 150 byte data)
   Entry 102: 175 bytes (25 byte header + 150 byte data)
   Entry 103: 175 bytes (25 byte header + 150 byte data)
-  Total used: 44 + 525 = 569 bytes, Free space: 3,527 bytes
+  Total used: 45 + 525 = 570 bytes, Free space: 3,526 bytes
 ```
 
 **Large Entry Spanning with Mixed Content (10KB entry):**
@@ -240,28 +246,28 @@ Page 1 (4096 bytes): [Header: 44 bytes, flags=0, seq=101-103]
 ```
 Entry 203: 10,225 byte data
 
-Page 1 (4096 bytes): [Header: 44 bytes, flags=FIRST_PART, seq=200-203]
+Page 1 (4096 bytes): [Header: 45 bytes, flags=FIRST_PART, seq=200-203]
   Entry 200: 175 bytes (complete entry)
   Entry 201: 175 bytes (complete entry)
   Entry 202: 175 bytes (complete entry)
-  Entry 203: 3,527 bytes (25 byte header + 3,502 bytes of data)
-  Total used: 44 + 525 + 3,527 = 4,096 bytes, Free space: 0 bytes
+  Entry 203: 3,526 bytes (25 byte header + 3,501 bytes of data)
+  Total used: 45 + 525 + 3,526 = 4,096 bytes, Free space: 0 bytes
 
-Entry 203 remaining bytes to write: 6,723 bytes
+Entry 203 remaining bytes to write: 6,724 bytes
 
-Page 2 (4096 bytes): [Header: 44 bytes, flags=MIDDLE_PART, seq=203-203]
-  Entry 203 continuation: 4,052 bytes (25 byte header + 4,027 bytes of data)
-  Total used: 44 + 4,052 = 4,096 bytes, Free space: 0 bytes
+Page 2 (4096 bytes): [Header: 45 bytes, flags=MIDDLE_PART, seq=203-203]
+  Entry 203 continuation: 4,051 bytes (25 byte header + 4,026 bytes of data)
+  Total used: 45 + 4,051 = 4,096 bytes, Free space: 0 bytes
 
-Remaining entry 203 to write: 2,696 bytes
+Remaining entry 203 to write: 2,698 bytes
 
-Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=203-207]
-  Entry 203 final data: 2,721 bytes (25 byte header + 2,696 bytes of data)
+Page 3 (4096 bytes): [Header: 45 bytes, flags=LAST_PART, seq=203-207]
+  Entry 203 final data: 2,723 bytes (25 byte header + 2,698 bytes of data)
   Entry 204: 200 bytes (complete entry)
   Entry 205: 200 bytes (complete entry)
   Entry 206: 200 bytes (complete entry)
   Entry 207: 200 bytes (complete entry)
-  Total used: 44 + 2,721 + 800 = 3,565, Free space: 531 bytes
+  Total used: 45 + 2,723 + 800 = 3,568, Free space: 528 bytes
 ```
 
 **Entry Spanning Single Page (FIRST_PART | LAST_PART):**
@@ -270,30 +276,30 @@ Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=203-207]
 Entry 304: 4,096 byte data
 Entry 305: 3,456 byte data
 
-Page 1 (4096 bytes): [Header: 44 bytes, flags=FIRST_PART, seq=300-304]
+Page 1 (4096 bytes): [Header: 45 bytes, flags=FIRST_PART, seq=300-304]
   Entry 300: 200 bytes (complete entry)
   Entry 301: 200 bytes (complete entry)
   Entry 302: 200 bytes (complete entry)
   Entry 303: 200 bytes (complete entry)
-  Entry 304: 3,252 bytes (FIRST_PART, 25 byte header + 3,227 bytes of data)
-  Total used: 44 + 800 + 3,252 = 4,096, Free space: 0 bytes
+  Entry 304: 3,251 bytes (FIRST_PART, 25 byte header + 3,226 bytes of data)
+  Total used: 45 + 800 + 3,251 = 4,096, Free space: 0 bytes
 
-Entry 304 remaining bytes to write: 869 bytes
+Entry 304 remaining bytes to write: 870 bytes
 
-Page 2 (4096 bytes): [Header: 44 bytes, flags=FIRST_PART | LAST_PART, seq=304-305]
-  Entry 304: 894 bytes (LAST_PART, 25 byte header + 869 bytes of data)
-  Entry 305: 3,158 bytes (FIRST_PART, 25 byte header + 3,133 bytes of data)
-  Total used: 44 + 894 + 3,158 = 4,096, Free space: 0 bytes
+Page 2 (4096 bytes): [Header: 45 bytes, flags=FIRST_PART | LAST_PART, seq=304-305]
+  Entry 304: 895 bytes (LAST_PART, 25 byte header + 870 bytes of data)
+  Entry 305: 3,156 bytes (FIRST_PART, 25 byte header + 3,131 bytes of data)
+  Total used: 45 + 895 + 3,156 = 4,096, Free space: 0 bytes
 
-Entry 305 remaining bytes to write: 323 bytes
+Entry 305 remaining bytes to write: 325 bytes
 
-Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=305-305]
-  Entry 305: 348 bytes (LAST_PART, 25 byte header + 323)
-  Total used: 44 + 348 = 392, Free space: 3,705 bytes
+Page 3 (4096 bytes): [Header: 45 bytes, flags=LAST_PART, seq=305-305]
+  Entry 305: 350 bytes (LAST_PART, 25 byte header + 325)
+  Total used: 45 + 350 = 395, Free space: 3,701 bytes
 ```
 
 **Key Rules:**
-- Every page always has a 44-byte header
+- Every page always has a 45-byte header
 - Every entry always has a 25-byte header
 - Continuation flags indicate spanning record parts: FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
 - Multiple complete entries can coexist with spanning entry parts in the same page
@@ -306,7 +312,7 @@ Page 3 (4096 bytes): [Header: 44 bytes, flags=LAST_PART, seq=305-305]
 
 ### Recovery Process:
 1. Seek to last page boundary in newest file
-2. Read 44-byte page header from the last page
+2. Read 45-byte page header from the last page
 3. Extract sequence and timestamp metadata instantly from header
 4. Check continuation flags to understand page content type
 5. Total recovery time: O(1) regardless of file size
@@ -406,14 +412,15 @@ long pagesScanned = metrics.getPagesScanned();
 ### Configuration
 
 ```java
-// Custom configuration
+// Default configuration (64MB file size, 4KB pages)
+WriteAheadLog wal = new FileBasedWAL(walDirectory);
+
+// Custom page size configuration
 WriteAheadLog wal = new FileBasedWAL(
     walDirectory,
-    64 * 1024 * 1024  // max file size (default: 64MB)
+    64 * 1024 * 1024,  // max file size (default: 64MB)
+    8                  // page size in KB (4, 8, 16, 32, or 64)
 );
-
-// Or use default settings
-WriteAheadLog wal = new FileBasedWAL(walDirectory);
 ```
 
 ### Flexible Data Handling

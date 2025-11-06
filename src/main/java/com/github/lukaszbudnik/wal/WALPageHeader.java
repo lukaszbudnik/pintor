@@ -5,11 +5,11 @@ import java.time.Instant;
 import java.util.zip.CRC32;
 
 /**
- * Header for WAL pages in the page-based storage format. Each page is 4KB (4096 bytes) with a
- * 44-byte header.
+ * Header for WAL pages in the page-based storage format. Each page is configurable (4KB, 8KB, 16KB,
+ * 32KB, or 64KB) with a 45-byte header.
  */
 class WALPageHeader {
-  static final int HEADER_SIZE = 44; // 4+1+8+8+8+8+2+1+4 = 44 bytes
+  static final int HEADER_SIZE = 45; // 4+1+8+8+8+8+2+1+1+4 = 45 bytes
   static final int MAGIC_NUMBER = 0xDEADBEEF;
   static final byte STORAGE_FORMAT_VERSION = 1;
 
@@ -27,6 +27,7 @@ class WALPageHeader {
   private final long lastTimestampMillis;
   private final short entryCount;
   private final byte continuationFlags;
+  private final byte pageSizeKB;
   private final int headerCRC;
 
   WALPageHeader(
@@ -35,7 +36,8 @@ class WALPageHeader {
       Instant firstTimestamp,
       Instant lastTimestamp,
       short entryCount,
-      byte continuationFlags) {
+      byte continuationFlags,
+      byte pageSizeKB) {
     this.magicNumber = MAGIC_NUMBER;
     this.version = STORAGE_FORMAT_VERSION;
     this.firstSequence = firstSequence;
@@ -44,6 +46,7 @@ class WALPageHeader {
     this.lastTimestampMillis = lastTimestamp.toEpochMilli();
     this.entryCount = entryCount;
     this.continuationFlags = continuationFlags;
+    this.pageSizeKB = pageSizeKB;
     this.headerCRC = calculateHeaderCRC();
   }
 
@@ -56,6 +59,7 @@ class WALPageHeader {
       long lastTimestampMillis,
       short entryCount,
       byte continuationFlags,
+      byte pageSizeKB,
       int headerCRC) {
     this.magicNumber = magicNumber;
     this.version = version;
@@ -65,11 +69,12 @@ class WALPageHeader {
     this.lastTimestampMillis = lastTimestampMillis;
     this.entryCount = entryCount;
     this.continuationFlags = continuationFlags;
+    this.pageSizeKB = pageSizeKB;
     this.headerCRC = headerCRC;
   }
 
   private int calculateHeaderCRC() {
-    ByteBuffer buffer = ByteBuffer.allocate(40); // Header size (44) minus CRC (4) = 40
+    ByteBuffer buffer = ByteBuffer.allocate(41); // Header size (45) minus CRC (4) = 41
     buffer.putInt(magicNumber);
     buffer.put(version);
     buffer.putLong(firstSequence);
@@ -78,6 +83,7 @@ class WALPageHeader {
     buffer.putLong(lastTimestampMillis);
     buffer.putShort(entryCount);
     buffer.put(continuationFlags);
+    buffer.put(pageSizeKB);
 
     CRC32 crc = new CRC32();
     crc.update(buffer.array());
@@ -94,6 +100,7 @@ class WALPageHeader {
     buffer.putLong(lastTimestampMillis);
     buffer.putShort(entryCount);
     buffer.put(continuationFlags);
+    buffer.put(pageSizeKB);
     buffer.putInt(headerCRC);
     return buffer.array();
   }
@@ -112,6 +119,7 @@ class WALPageHeader {
     long lastTimestampMillis = buffer.getLong();
     short entryCount = buffer.getShort();
     byte continuationFlags = buffer.get();
+    byte pageSizeKB = buffer.get();
     int headerCRC = buffer.getInt();
 
     WALPageHeader header =
@@ -124,6 +132,7 @@ class WALPageHeader {
             lastTimestampMillis,
             entryCount,
             continuationFlags,
+            pageSizeKB,
             headerCRC);
 
     if (magicNumber != MAGIC_NUMBER) {
@@ -164,6 +173,10 @@ class WALPageHeader {
 
   byte getContinuationFlags() {
     return continuationFlags;
+  }
+
+  byte getPageSizeKB() {
+    return pageSizeKB;
   }
 
   boolean isSpanningRecord() {

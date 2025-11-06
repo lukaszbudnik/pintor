@@ -21,7 +21,7 @@ class SpanningEntryTest {
   void setUp() throws Exception {
     tempDir = Files.createTempDirectory("spanning-entry-test");
     // Use small page size to force spanning entries
-    wal = new FileBasedWAL(tempDir, 8192); // 8KB file size limit
+    wal = new FileBasedWAL(tempDir, 8192, (byte) 4); // 8KB file size limit
   }
 
   @AfterEach
@@ -167,7 +167,7 @@ class SpanningEntryTest {
   void testSpanningEntryWithFileRotation() throws Exception {
     // Use very small file size to force rotation
     wal.close();
-    wal = new FileBasedWAL(tempDir, 4096); // 4KB file size limit
+    wal = new FileBasedWAL(tempDir, 4096, (byte) 4); // 4KB file size limit
 
     // Add small entries to fill up most of first page
     for (int i = 0; i < 20; i++) {

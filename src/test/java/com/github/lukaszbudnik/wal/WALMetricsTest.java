@@ -117,7 +117,7 @@ class WALMetricsTest {
   void testFileCreationMetrics() throws Exception {
     // Use smaller file size to force rotation
     wal.close();
-    wal = new FileBasedWAL(tempDir, 8192); // 8KB files
+    wal = new FileBasedWAL(tempDir, 8192, (byte) 4); // 8KB files
 
     WALMetrics metrics = wal.getMetrics();
     long initialFiles = metrics.getFilesCreated();

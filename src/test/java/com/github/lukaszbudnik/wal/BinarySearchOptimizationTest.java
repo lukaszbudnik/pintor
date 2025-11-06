@@ -23,7 +23,7 @@ class BinarySearchOptimizationTest {
 
   @BeforeEach
   void setUp() throws WALException {
-    wal = new FileBasedWAL(tempDir, SMALL_FILE_SIZE);
+    wal = new FileBasedWAL(tempDir, SMALL_FILE_SIZE, (byte) 4);
   }
 
   @AfterEach
