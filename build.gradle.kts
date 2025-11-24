@@ -38,7 +38,7 @@ dependencies {
     val mockitoVersion = "5.20.0"
     val junitVersion = "6.0.1"
     val slf4jVersion = "2.0.17"
-    val logbackVersion = "1.5.20"
+    val logbackVersion = "1.5.21"
 
     implementation("org.slf4j:slf4j-api:$slf4jVersion")
     implementation("io.projectreactor:reactor-core:$reactorVersion")
