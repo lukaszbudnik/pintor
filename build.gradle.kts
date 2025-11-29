@@ -1,14 +1,33 @@
 plugins {
     id("java")
     id("jacoco")
+    id("maven-publish")
     id("com.diffplug.spotless") version "8.0.0"
 }
 
 group = "com.github.lukaszbudnik"
-version = "1.0-SNAPSHOT"
+version = "1.0.0"
 
 repositories {
     mavenCentral()
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+        }
+    }
+    repositories {
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/lukaszbudnik/pintor")
+            credentials {
+                username = project.findProperty("USERNAME") as String? ?: System.getenv("USERNAME")
+                password = project.findProperty("TOKEN") as String? ?: System.getenv("TOKEN")
+            }
+        }
+    }
 }
 
 // Enforce Java 17
