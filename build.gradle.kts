@@ -2,7 +2,7 @@ plugins {
     id("java")
     id("jacoco")
     id("maven-publish")
-    id("com.diffplug.spotless") version "8.0.0"
+    id("com.diffplug.spotless") version "8.1.0"
 }
 
 group = "com.github.lukaszbudnik"
@@ -53,11 +53,11 @@ jacoco {
 }
 
 dependencies {
-    val reactorVersion = "3.7.12"
+    val reactorVersion = "3.8.0"
     val mockitoVersion = "5.20.0"
     val junitVersion = "6.0.1"
     val slf4jVersion = "2.0.17"
-    val logbackVersion = "1.5.20"
+    val logbackVersion = "1.5.21"
 
     implementation("org.slf4j:slf4j-api:$slf4jVersion")
     implementation("io.projectreactor:reactor-core:$reactorVersion")
