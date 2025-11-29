@@ -10,6 +10,7 @@ Pintor is a robust, thread-safe Java implementation of a Write Ahead Log (WAL) s
 - ⚡ **Performance optimizations**: Batch APIs, configurable sync, efficient seeking and truncation.
 - 🚀 **Binary search optimization**: Two-level logarithmic range queries: O(log(files) + log(pages)) vs O(files × pages)).
 - 🧩 **Flexible design**: Generic record types, clean encapsulation.
+- 🔗 **File rotation hooks**: Configurable callbacks for archival, backup, and disaster recovery integration.
 - 🤖 **AI-assisted development**: Generated codebase for production readiness.
 
 ## Getting Started
@@ -109,6 +110,26 @@ try (WriteAheadLog wal = new FileBasedWAL(walDir)) {
     // Continue operations with proper sequence number continuation
     WALEntry newEntry = wal.createAndAppend(ByteBuffer.wrap("recovered_data".getBytes()));
     System.out.println("New entry sequence: " + newEntry.getSequenceNumber()); // Will be lastSeq + 1
+}
+```
+
+### File Rotation Hooks
+
+Configure callbacks for file rotation events to enable archival, backup, and disaster recovery:
+
+```java
+FileRotationCallback callback = (firstSeq, firstTimestamp, lastSeq, lastTimestamp, filePath) -> {
+    // Archive to S3
+    s3Client.uploadFile(filePath, "backup-bucket/wal/" + filePath.getFileName());
+    
+    // Log rotation event
+    logger.info("Rotated WAL file {} with sequences {}-{}", 
+                filePath, firstSeq, lastSeq);
+};
+
+try (WriteAheadLog wal = new FileBasedWAL(walDir, callback)) {
+    // Callback triggered automatically on file rotation
+    wal.createAndAppend(ByteBuffer.wrap("data".getBytes()));
 }
 ```
 
