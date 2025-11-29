@@ -42,6 +42,7 @@ public class FileBasedWAL implements WriteAheadLog {
   private final ReadWriteLock lock = new ReentrantReadWriteLock();
   private final Map<Integer, Path> walFiles = new TreeMap<>();
   private final WALMetrics metrics = new WALMetrics();
+  private final FileRotationCallback rotationCallback;
 
   private long currentSequenceNumber = -1;
   private int currentFileIndex = 0;
@@ -56,16 +57,23 @@ public class FileBasedWAL implements WriteAheadLog {
   private short currentPageEntryCount = 0;
 
   public FileBasedWAL(Path walDirectory) throws WALException {
-    this(walDirectory, DEFAULT_MAX_FILE_SIZE, DEFAULT_PAGE_SIZE_KB);
+    this(walDirectory, DEFAULT_MAX_FILE_SIZE, DEFAULT_PAGE_SIZE_KB, null);
   }
 
   public FileBasedWAL(Path walDirectory, int maxFileSize, byte pageSizeKB) throws WALException {
+    this(walDirectory, maxFileSize, pageSizeKB, null);
+  }
+
+  public FileBasedWAL(
+      Path walDirectory, int maxFileSize, byte pageSizeKB, FileRotationCallback rotationCallback)
+      throws WALException {
     validatePageSize(pageSizeKB);
     this.walDirectory = walDirectory;
     this.maxFileSize = maxFileSize;
     this.pageSizeKB = pageSizeKB;
     this.pageSize = pageSizeKB * 1024;
     this.pageDataSize = pageSize - WALPageHeader.HEADER_SIZE;
+    this.rotationCallback = rotationCallback;
 
     logger.info(
         "Initializing FileBasedWAL: directory={}, maxFileSize={} bytes, pageSize={}KB",
@@ -539,7 +547,31 @@ public class FileBasedWAL implements WriteAheadLog {
   private void rotateFile() throws IOException, WALException {
     logger.info("Rotating WAL file from index {} to {}", currentFileIndex, currentFileIndex + 1);
 
+    // Get metadata from current file before closing it
+    Path currentFilePath = walFiles.get(currentFileIndex);
+    FileMetadata metadata = null;
+    if (rotationCallback != null && currentFilePath != null && currentFile != null) {
+      // Sync the file first to ensure all data is written
+      currentFile.getFD().sync();
+      metadata = getFileMetadata(currentFilePath);
+    }
+
     currentFile.close();
+
+    // Call rotation callback with file metadata
+    if (rotationCallback != null && metadata != null) {
+      try {
+        rotationCallback.onFileRotated(
+            metadata.firstSequence,
+            metadata.firstTimestamp,
+            metadata.lastSequence,
+            metadata.lastTimestamp,
+            currentFilePath);
+      } catch (Exception e) {
+        logger.warn(
+            "File rotation callback failed for file {}: {}", currentFilePath, e.getMessage(), e);
+      }
+    }
 
     currentFileIndex++;
     openCurrentFile();
@@ -548,6 +580,49 @@ public class FileBasedWAL implements WriteAheadLog {
         "File rotation completed: new file index={}, total files={}",
         currentFileIndex,
         walFiles.size());
+  }
+
+  private FileMetadata getFileMetadata(Path filePath) throws IOException, WALException {
+    try (RandomAccessFile file = new RandomAccessFile(filePath.toFile(), "r")) {
+      long fileSize = file.length();
+      if (fileSize == 0) {
+        return null;
+      }
+
+      // Read first page header
+      file.seek(0);
+      byte[] firstHeaderData = new byte[WALPageHeader.HEADER_SIZE];
+      file.readFully(firstHeaderData);
+      WALPageHeader firstHeader = WALPageHeader.deserialize(firstHeaderData);
+
+      // Read last page header
+      long lastPagePosition = ((fileSize - 1) / pageSize) * pageSize;
+      file.seek(lastPagePosition);
+      byte[] lastHeaderData = new byte[WALPageHeader.HEADER_SIZE];
+      file.readFully(lastHeaderData);
+      WALPageHeader lastHeader = WALPageHeader.deserialize(lastHeaderData);
+
+      return new FileMetadata(
+          firstHeader.getFirstSequence(),
+          firstHeader.getFirstTimestamp(),
+          lastHeader.getLastSequence(),
+          lastHeader.getLastTimestamp());
+    }
+  }
+
+  private static class FileMetadata {
+    final long firstSequence;
+    final Instant firstTimestamp;
+    final long lastSequence;
+    final Instant lastTimestamp;
+
+    FileMetadata(
+        long firstSequence, Instant firstTimestamp, long lastSequence, Instant lastTimestamp) {
+      this.firstSequence = firstSequence;
+      this.firstTimestamp = firstTimestamp;
+      this.lastSequence = lastSequence;
+      this.lastTimestamp = lastTimestamp;
+    }
   }
 
   @Override
