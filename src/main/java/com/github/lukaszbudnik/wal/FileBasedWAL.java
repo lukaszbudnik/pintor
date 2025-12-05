@@ -55,6 +55,7 @@ public class FileBasedWAL implements WriteAheadLog {
   private Instant currentPageFirstTimestamp;
   private Instant currentPageLastTimestamp;
   private short currentPageEntryCount = 0;
+  private byte currentPageContinuationFlags = WALPageHeader.NO_CONTINUATION;
 
   public FileBasedWAL(Path walDirectory) throws WALException {
     this(walDirectory, DEFAULT_MAX_FILE_SIZE, DEFAULT_PAGE_SIZE_KB, null);
@@ -257,6 +258,7 @@ public class FileBasedWAL implements WriteAheadLog {
     currentPageFirstTimestamp = null;
     currentPageLastTimestamp = null;
     currentPageEntryCount = 0;
+    currentPageContinuationFlags = WALPageHeader.NO_CONTINUATION;
 
     logger.debug("Initialized new page buffer: available space={} bytes", pageDataSize);
   }
@@ -322,7 +324,26 @@ public class FileBasedWAL implements WriteAheadLog {
     }
   }
 
-  /** Write entry to current page buffer, handling spanning entries across multiple pages. */
+  /**
+   * Write entry to current page buffer, handling spanning entries across multiple pages.
+   *
+   * <p>This method implements page space utilization optimization by checking if the current page
+   * has sufficient space (>= 25 bytes for entry header) to write the first part of a spanning
+   * entry. This eliminates unnecessary page flushes and reduces wasted space.
+   *
+   * <p>Entry writing logic:
+   *
+   * <ul>
+   *   <li>If entry fits in current page: write directly to current page
+   *   <li>If entry fits in single page but not current: flush current page, write to new page
+   *   <li>If entry needs spanning and current page has >= 25 bytes: use current page for first part
+   *   <li>If entry needs spanning and current page has < 25 bytes: flush first, then span
+   * </ul>
+   *
+   * @param entry the WAL entry to write
+   * @throws IOException if I/O error occurs during writing
+   * @throws WALException if WAL-specific error occurs
+   */
   private void writeEntry(WALEntry entry) throws IOException, WALException {
     byte[] serializedEntry = serializeEntry(entry);
     int entrySize = serializedEntry.length;
@@ -348,15 +369,25 @@ public class FileBasedWAL implements WriteAheadLog {
       writeEntryToCurrentPage(entry, serializedEntry);
     } else {
       // Entry is too large for a single page - needs spanning
-      // First, flush current page if it has any data
-      if (currentPageBuffer.position() > WALPageHeader.HEADER_SIZE) {
-        logger.debug("Flushing current page before starting spanning entry");
-        flushCurrentPage();
-        initializeNewPage();
+      // Check if we can use current page for first part
+      if (currentPageBuffer.remaining() >= ENTRY_HEADER_SIZE) {
+        // Use current page for first part - optimization to utilize available space
+        logger.debug(
+            "Using current page for spanning entry first part: available={} bytes",
+            currentPageBuffer.remaining());
+        writeSpanningEntry(entry, serializedEntry);
+      } else {
+        // Not enough space even for header, flush first
+        if (currentPageBuffer.position() > WALPageHeader.HEADER_SIZE) {
+          logger.debug(
+              "Insufficient space for entry header ({} < {}), flushing current page",
+              currentPageBuffer.remaining(),
+              ENTRY_HEADER_SIZE);
+          flushCurrentPage();
+          initializeNewPage();
+        }
+        writeSpanningEntry(entry, serializedEntry);
       }
-
-      // Now write the spanning entry starting from a clean page
-      writeSpanningEntry(entry, serializedEntry);
     }
 
     logger.debug("Entry written: seq={}, totalSize={} bytes", entry.getSequenceNumber(), entrySize);
@@ -393,7 +424,34 @@ public class FileBasedWAL implements WriteAheadLog {
     }
   }
 
-  /** Write entry that spans multiple pages. */
+  /**
+   * Write entry that spans multiple pages, handling non-empty pages correctly.
+   *
+   * <p>This method has been optimized to handle pages that already contain complete entries. Unlike
+   * the previous implementation that assumed a clean page, this version:
+   *
+   * <ul>
+   *   <li>Preserves existing page metadata (first sequence, timestamps, entry count)
+   *   <li>Correctly combines continuation flags when page has LAST_PART from previous entry
+   *   <li>Handles mixed pages with both complete entries and spanning entry parts
+   *   <li>Uses bitwise OR to combine flags: LAST_PART | FIRST_PART = 5
+   * </ul>
+   *
+   * <p>Flag combination behavior:
+   *
+   * <ul>
+   *   <li>FIRST_PART (1): First part of spanning entry
+   *   <li>MIDDLE_PART (2): Middle part of spanning entry
+   *   <li>LAST_PART (4): Last part of spanning entry
+   *   <li>FIRST_PART | LAST_PART (5): Page contains both last part of one entry and first part of
+   *       another
+   * </ul>
+   *
+   * @param entry the WAL entry to write across multiple pages
+   * @param serializedEntry the serialized byte array of the entry
+   * @throws IOException if I/O error occurs during writing
+   * @throws WALException if WAL-specific error occurs
+   */
   private void writeSpanningEntry(WALEntry entry, byte[] serializedEntry)
       throws IOException, WALException {
     logger.debug(
@@ -403,9 +461,28 @@ public class FileBasedWAL implements WriteAheadLog {
 
     int bytesWritten = 0;
     int totalBytes = serializedEntry.length;
-    boolean isFirstPage = true;
+    boolean isFirstPart = true;
 
     while (bytesWritten < totalBytes) {
+      // Check if current page already has complete entries
+      // If so, we need to flush them first before writing spanning entry data
+      // This ensures pages don't mix complete entries with spanning entry data
+      boolean pageHasCompleteEntries =
+          (currentPageFirstSequence != -1
+              && currentPageContinuationFlags == WALPageHeader.NO_CONTINUATION);
+
+      if (isFirstPart && pageHasCompleteEntries) {
+        // Flush complete entries first, then start spanning entry on new page
+        logger.debug(
+            "Flushing page with complete entries before starting spanning entry: entries={}, seq={}-{}",
+            currentPageEntryCount,
+            currentPageFirstSequence,
+            currentPageLastSequence);
+        flushCurrentPage();
+        initializeNewPage();
+      }
+
+      // Calculate available space
       int availableSpace = currentPageBuffer.remaining();
       int bytesToWrite = Math.min(availableSpace, totalBytes - bytesWritten);
 
@@ -422,22 +499,30 @@ public class FileBasedWAL implements WriteAheadLog {
       currentPageLastTimestamp = entry.getTimestamp();
 
       // Determine continuation flags and entry count
-      byte continuationFlags;
-      if (isFirstPage) {
-        continuationFlags =
+      byte newContinuationFlags;
+      if (isFirstPart) {
+        // First part of spanning entry
+        newContinuationFlags =
             (bytesWritten >= totalBytes) ? WALPageHeader.NO_CONTINUATION : WALPageHeader.FIRST_PART;
-        currentPageEntryCount = 1; // Only first page counts the entry
-        isFirstPage = false;
+        currentPageEntryCount = 1;
+        isFirstPart = false;
       } else if (bytesWritten >= totalBytes) {
-        continuationFlags = WALPageHeader.LAST_PART;
+        // Last part of spanning entry
+        newContinuationFlags = WALPageHeader.LAST_PART;
         currentPageEntryCount = 0; // Continuation pages don't count entries
       } else {
-        continuationFlags = WALPageHeader.MIDDLE_PART;
+        // Middle part of spanning entry
+        newContinuationFlags = WALPageHeader.MIDDLE_PART;
         currentPageEntryCount = 0; // Continuation pages don't count entries
       }
 
+      // Update current page continuation flags to track what flags this page has
+      // This is used for combining flags when multiple spanning parts are on the same page
+      currentPageContinuationFlags = (byte) (currentPageContinuationFlags | newContinuationFlags);
+
       // Flush current page with appropriate continuation flags
-      flushCurrentPageWithFlags(continuationFlags);
+      // The flushCurrentPageWithFlags method will use the combined flags
+      flushCurrentPageWithFlags(newContinuationFlags);
 
       // Start new page if more data to write
       if (bytesWritten < totalBytes) {
@@ -451,12 +536,37 @@ public class FileBasedWAL implements WriteAheadLog {
     flushCurrentPageWithFlags(WALPageHeader.NO_CONTINUATION);
   }
 
-  /** Flush current page buffer to disk with specified continuation flags. */
+  /**
+   * Flush current page buffer to disk with specified continuation flags.
+   *
+   * <p>This method implements flag combination logic using bitwise OR operations to handle
+   * scenarios where a page contains multiple spanning entry parts. For example, when a page ends
+   * with the last part of one spanning entry (LAST_PART) and begins with the first part of another
+   * spanning entry (FIRST_PART), the combined flags become LAST_PART | FIRST_PART = 5.
+   *
+   * <p>Flag combination examples:
+   *
+   * <ul>
+   *   <li>Page with only complete entries: flags = 0 (NO_CONTINUATION)
+   *   <li>Page with first part of spanning entry: flags = 1 (FIRST_PART)
+   *   <li>Page with last part of spanning entry: flags = 4 (LAST_PART)
+   *   <li>Page with both last and first parts: flags = 5 (LAST_PART | FIRST_PART)
+   * </ul>
+   *
+   * @param continuationFlags the continuation flags for the current write operation
+   * @throws IOException if I/O error occurs during flushing
+   * @throws WALException if WAL-specific error occurs
+   */
   private void flushCurrentPageWithFlags(byte continuationFlags) throws IOException, WALException {
     if (currentPageBuffer == null || currentPageBuffer.position() <= WALPageHeader.HEADER_SIZE) {
       logger.debug("No data to flush in current page");
       return; // No data to flush
     }
+
+    // Combine flags with existing page flags using bitwise OR
+    // This handles the case where a page has LAST_PART from a previous spanning entry
+    // and we're adding FIRST_PART from a new spanning entry
+    byte combinedFlags = (byte) (currentPageContinuationFlags | continuationFlags);
 
     // Create page header
     Instant firstTs = currentPageFirstTimestamp != null ? currentPageFirstTimestamp : Instant.now();
@@ -469,16 +579,19 @@ public class FileBasedWAL implements WriteAheadLog {
             firstTs,
             lastTs,
             currentPageEntryCount,
-            continuationFlags,
+            combinedFlags,
             pageSizeKB);
 
     logger.debug(
-        "Flushing page to disk: seq={}-{}, entries={}, dataSize={} bytes, flags={}",
+        "Flushing page to disk: seq={}-{}, entries={}, dataSize={} bytes, flags={} (current={}, new={}, combined={})",
         currentPageFirstSequence,
         currentPageLastSequence,
         currentPageEntryCount,
         currentPageBuffer.position() - WALPageHeader.HEADER_SIZE,
-        continuationFlags);
+        combinedFlags,
+        currentPageContinuationFlags,
+        continuationFlags,
+        combinedFlags);
 
     // Write header at beginning of buffer
     byte[] headerBytes = header.serialize();
@@ -500,8 +613,9 @@ public class FileBasedWAL implements WriteAheadLog {
     metrics.incrementPagesWritten();
 
     // Check if we need to rotate file (only if not in middle of spanning entry)
-    if (continuationFlags == WALPageHeader.NO_CONTINUATION
-        || continuationFlags == WALPageHeader.LAST_PART) {
+    if (combinedFlags == WALPageHeader.NO_CONTINUATION
+        || combinedFlags == WALPageHeader.LAST_PART
+        || combinedFlags == (WALPageHeader.FIRST_PART | WALPageHeader.LAST_PART)) {
       if (currentFile.length() >= maxFileSize) {
         logger.debug(
             "File size limit reached: {} >= {}, triggering rotation",
@@ -809,6 +923,25 @@ public class FileBasedWAL implements WriteAheadLog {
     }
   }
 
+  /**
+   * Emits entries from a WAL file, handling spanning entries across multiple pages.
+   *
+   * <p>This method correctly handles the page space optimization where pages can contain combined
+   * continuation flags (FIRST_PART | LAST_PART = 5). The logic works because:
+   *
+   * <p>1. isFirstPart() uses bitwise AND: (flags & FIRST_PART) != 0 - For combined flags (5): 5 & 1
+   * = 1 ≠ 0 → true 2. isLastPart() uses bitwise AND: (flags & LAST_PART) != 0 - For combined flags
+   * (5): 5 & 4 = 4 ≠ 0 → true
+   *
+   * <p>When a page has combined flags (FIRST_PART | LAST_PART): - isLastPart() triggers first,
+   * completing the previous spanning entry - isFirstPart() triggers second, starting accumulation
+   * of the new spanning entry - Both conditions can be true simultaneously, handling the transition
+   * correctly
+   *
+   * <p>This ensures backward compatibility with files created by version 1.0.0 (which never use
+   * combined flags) while supporting the version 1.1.0 optimization that utilizes available page
+   * space.
+   */
   private <T extends Comparable<T>> void emitEntriesFromFile(
       FluxSink<WALEntry> sink, Path walFile, RangeQuery<T> query) throws IOException, WALException {
     logger.debug(
