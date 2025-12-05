@@ -326,19 +326,20 @@ public class FileBasedWAL implements WriteAheadLog {
 
   /**
    * Write entry to current page buffer, handling spanning entries across multiple pages.
-   * 
+   *
    * <p>This method implements page space utilization optimization by checking if the current page
-   * has sufficient space (>= 25 bytes for entry header) to write the first part of a spanning entry.
-   * This eliminates unnecessary page flushes and reduces wasted space.
-   * 
+   * has sufficient space (>= 25 bytes for entry header) to write the first part of a spanning
+   * entry. This eliminates unnecessary page flushes and reduces wasted space.
+   *
    * <p>Entry writing logic:
+   *
    * <ul>
-   *   <li>If entry fits in current page: write directly to current page</li>
-   *   <li>If entry fits in single page but not current: flush current page, write to new page</li>
-   *   <li>If entry needs spanning and current page has >= 25 bytes: use current page for first part</li>
-   *   <li>If entry needs spanning and current page has < 25 bytes: flush first, then span</li>
+   *   <li>If entry fits in current page: write directly to current page
+   *   <li>If entry fits in single page but not current: flush current page, write to new page
+   *   <li>If entry needs spanning and current page has >= 25 bytes: use current page for first part
+   *   <li>If entry needs spanning and current page has < 25 bytes: flush first, then span
    * </ul>
-   * 
+   *
    * @param entry the WAL entry to write
    * @throws IOException if I/O error occurs during writing
    * @throws WALException if WAL-specific error occurs
@@ -425,24 +426,27 @@ public class FileBasedWAL implements WriteAheadLog {
 
   /**
    * Write entry that spans multiple pages, handling non-empty pages correctly.
-   * 
-   * <p>This method has been optimized to handle pages that already contain complete entries.
-   * Unlike the previous implementation that assumed a clean page, this version:
+   *
+   * <p>This method has been optimized to handle pages that already contain complete entries. Unlike
+   * the previous implementation that assumed a clean page, this version:
+   *
    * <ul>
-   *   <li>Preserves existing page metadata (first sequence, timestamps, entry count)</li>
-   *   <li>Correctly combines continuation flags when page has LAST_PART from previous entry</li>
-   *   <li>Handles mixed pages with both complete entries and spanning entry parts</li>
-   *   <li>Uses bitwise OR to combine flags: LAST_PART | FIRST_PART = 5</li>
+   *   <li>Preserves existing page metadata (first sequence, timestamps, entry count)
+   *   <li>Correctly combines continuation flags when page has LAST_PART from previous entry
+   *   <li>Handles mixed pages with both complete entries and spanning entry parts
+   *   <li>Uses bitwise OR to combine flags: LAST_PART | FIRST_PART = 5
    * </ul>
-   * 
+   *
    * <p>Flag combination behavior:
+   *
    * <ul>
-   *   <li>FIRST_PART (1): First part of spanning entry</li>
-   *   <li>MIDDLE_PART (2): Middle part of spanning entry</li>
-   *   <li>LAST_PART (4): Last part of spanning entry</li>
-   *   <li>FIRST_PART | LAST_PART (5): Page contains both last part of one entry and first part of another</li>
+   *   <li>FIRST_PART (1): First part of spanning entry
+   *   <li>MIDDLE_PART (2): Middle part of spanning entry
+   *   <li>LAST_PART (4): Last part of spanning entry
+   *   <li>FIRST_PART | LAST_PART (5): Page contains both last part of one entry and first part of
+   *       another
    * </ul>
-   * 
+   *
    * @param entry the WAL entry to write across multiple pages
    * @param serializedEntry the serialized byte array of the entry
    * @throws IOException if I/O error occurs during writing
@@ -534,20 +538,21 @@ public class FileBasedWAL implements WriteAheadLog {
 
   /**
    * Flush current page buffer to disk with specified continuation flags.
-   * 
+   *
    * <p>This method implements flag combination logic using bitwise OR operations to handle
-   * scenarios where a page contains multiple spanning entry parts. For example, when a page
-   * ends with the last part of one spanning entry (LAST_PART) and begins with the first part
-   * of another spanning entry (FIRST_PART), the combined flags become LAST_PART | FIRST_PART = 5.
-   * 
+   * scenarios where a page contains multiple spanning entry parts. For example, when a page ends
+   * with the last part of one spanning entry (LAST_PART) and begins with the first part of another
+   * spanning entry (FIRST_PART), the combined flags become LAST_PART | FIRST_PART = 5.
+   *
    * <p>Flag combination examples:
+   *
    * <ul>
-   *   <li>Page with only complete entries: flags = 0 (NO_CONTINUATION)</li>
-   *   <li>Page with first part of spanning entry: flags = 1 (FIRST_PART)</li>
-   *   <li>Page with last part of spanning entry: flags = 4 (LAST_PART)</li>
-   *   <li>Page with both last and first parts: flags = 5 (LAST_PART | FIRST_PART)</li>
+   *   <li>Page with only complete entries: flags = 0 (NO_CONTINUATION)
+   *   <li>Page with first part of spanning entry: flags = 1 (FIRST_PART)
+   *   <li>Page with last part of spanning entry: flags = 4 (LAST_PART)
+   *   <li>Page with both last and first parts: flags = 5 (LAST_PART | FIRST_PART)
    * </ul>
-   * 
+   *
    * @param continuationFlags the continuation flags for the current write operation
    * @throws IOException if I/O error occurs during flushing
    * @throws WALException if WAL-specific error occurs
