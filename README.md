@@ -250,7 +250,7 @@ Pages and WAL entries are buffered in memory and written to disk when any of the
 3. Reading from log - When any of the read*() methods are called to make sure all data is on disk
 4. WAL closure - When close() method is called to ensure all data is persisted
 
-In v2 Pintor optimizes page space utilization by using available space (>= 25 bytes) for spanning entry first parts, reducing wasted space. The implementation is backward compatible - v2 can read v1 files without any issues.
+In version 1.1.0 Pintor optimizes page space utilization by using available space (>= 25 bytes) for spanning entry first parts, reducing wasted space. The implementation is backward compatible - version 1.1.0 can read files created by version 1.0.0 without any issues.
 
 ### Record Spanning Examples
 

@@ -12,23 +12,24 @@ import org.junit.jupiter.api.io.TempDir;
 import reactor.core.publisher.Flux;
 
 /**
- * Tests backward compatibility between v1 WAL files (created without optimization) and v2 WAL code
- * (with page space utilization optimization).
+ * Tests backward compatibility between WAL files created by version 1.0.0 (without optimization)
+ * and version 1.1.0 code (with page space utilization optimization).
  *
- * <p>This ensures that WAL files created with v1 can be read correctly by v2 code without any data
- * loss or corruption.
+ * <p>This ensures that WAL files created with version 1.0.0 can be read correctly by version 1.1.0
+ * code without any data loss or corruption. Both versions use storage format version 1.
  */
 class BackwardCompatibilityTest {
 
-  private static final Path V1_FILES_DIR = Paths.get("src/test/resources/v1-wal-files");
+  private static final Path V1_0_0_FILES_DIR = Paths.get("src/test/resources/v1-wal-files");
 
   @Test
-  void testReadV1SmallEntriesWithV2Code(@TempDir Path tempDir) throws Exception {
-    // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("small-entries");
-    Path testDir = copyV1Files(v1Dir, tempDir.resolve("small-entries"));
+  void testReadVersion1_0_0SmallEntriesWithVersion1_1_0Code(@TempDir Path tempDir)
+      throws Exception {
+    // Copy version 1.0.0 WAL files to temp directory
+    Path v1_0_0Dir = V1_0_0_FILES_DIR.resolve("small-entries");
+    Path testDir = copyV1Files(v1_0_0Dir, tempDir.resolve("small-entries"));
 
-    // Read with v2 code (current implementation with optimization)
+    // Read with version 1.1.0 code (current implementation with optimization)
     try (FileBasedWAL wal = new FileBasedWAL(testDir)) {
       List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
 
@@ -52,12 +53,13 @@ class BackwardCompatibilityTest {
   }
 
   @Test
-  void testReadV1LargeEntriesWithV2Code(@TempDir Path tempDir) throws Exception {
-    // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("large-entries");
-    Path testDir = copyV1Files(v1Dir, tempDir.resolve("large-entries"));
+  void testReadVersion1_0_0LargeEntriesWithVersion1_1_0Code(@TempDir Path tempDir)
+      throws Exception {
+    // Copy version 1.0.0 WAL files to temp directory
+    Path v1_0_0Dir = V1_0_0_FILES_DIR.resolve("large-entries");
+    Path testDir = copyV1Files(v1_0_0Dir, tempDir.resolve("large-entries"));
 
-    // Read with v2 code
+    // Read with version 1.1.0 code
     try (FileBasedWAL wal = new FileBasedWAL(testDir)) {
       List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
 
@@ -83,18 +85,19 @@ class BackwardCompatibilityTest {
   }
 
   @Test
-  void testReadV1SpanningEntriesWithV2Code(@TempDir Path tempDir) throws Exception {
-    // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("spanning-entries");
-    Path testDir = copyV1Files(v1Dir, tempDir.resolve("spanning-entries"));
+  void testReadVersion1_0_0SpanningEntriesWithVersion1_1_0Code(@TempDir Path tempDir)
+      throws Exception {
+    // Copy version 1.0.0 WAL files to temp directory
+    Path v1_0_0Dir = V1_0_0_FILES_DIR.resolve("spanning-entries");
+    Path testDir = copyV1Files(v1_0_0Dir, tempDir.resolve("spanning-entries"));
 
-    // Read with v2 code
+    // Read with version 1.1.0 code
     try (FileBasedWAL wal = new FileBasedWAL(testDir)) {
       List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
 
-      // Note: v1 files show currentSequence=11 (size=12) but only 9 entries are readable
-      // This appears to be a v1 implementation issue where final entries in page buffer
-      // are not properly flushed/readable. The v2 code correctly reads what's available.
+      // Note: version 1.0.0 files show currentSequence=11 (size=12) but only 9 entries are readable
+      // This appears to be a version 1.0.0 implementation issue where final entries in page buffer
+      // are not properly flushed/readable. The version 1.1.0 code correctly reads what's available.
       assertEquals(9, entries.size());
 
       // Verify initial small entries (0-4)
@@ -118,8 +121,9 @@ class BackwardCompatibilityTest {
         assertTrue(Math.abs(data.length() - expectedSizes[i]) < 100);
       }
 
-      // Note: Final 3 small entries (sequences 9-11) are not readable from v1 files
-      // This appears to be a v1 implementation limitation, but v2 correctly reads available data
+      // Note: Final 3 small entries (sequences 9-11) are not readable from version 1.0.0 files
+      // This appears to be a version 1.0.0 implementation limitation, but version 1.1.0 correctly
+      // reads available data
 
       // Verify WAL state shows the expected sequence numbers even though entries aren't readable
       assertEquals(11L, wal.getCurrentSequenceNumber());
@@ -128,17 +132,20 @@ class BackwardCompatibilityTest {
   }
 
   @Test
-  void testReadV1MixedWorkloadWithV2Code(@TempDir Path tempDir) throws Exception {
-    // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("mixed-workload");
-    Path testDir = copyV1Files(v1Dir, tempDir.resolve("mixed-workload"));
+  void testReadVersion1_0_0MixedWorkloadWithVersion1_1_0Code(@TempDir Path tempDir)
+      throws Exception {
+    // Copy version 1.0.0 WAL files to temp directory
+    Path v1_0_0Dir = V1_0_0_FILES_DIR.resolve("mixed-workload");
+    Path testDir = copyV1Files(v1_0_0Dir, tempDir.resolve("mixed-workload"));
 
-    // Read with v2 code
+    // Read with version 1.1.0 code
     try (FileBasedWAL wal = new FileBasedWAL(testDir)) {
       List<WALEntry> entries = Flux.from(wal.readFrom(0L)).collectList().block();
 
-      // Note: v1 files show currentSequence=29 (size=30) but only 20 entries are readable
-      // This appears to be the same v1 implementation issue with final entries in page buffer
+      // Note: version 1.0.0 files show currentSequence=29 (size=30) but only 20 entries are
+      // readable
+      // This appears to be the same version 1.0.0 implementation issue with final entries in page
+      // buffer
       assertEquals(20, entries.size());
 
       // Verify we can read entries and they have expected patterns
@@ -162,10 +169,11 @@ class BackwardCompatibilityTest {
   }
 
   @Test
-  void testReadV1MultipleFilesWithV2Code(@TempDir Path tempDir) throws Exception {
-    // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("multiple-files");
-    Path testDir = copyV1Files(v1Dir, tempDir.resolve("multiple-files"));
+  void testReadVersion1_0_0MultipleFilesWithVersion1_1_0Code(@TempDir Path tempDir)
+      throws Exception {
+    // Copy version 1.0.0 WAL files to temp directory
+    Path v1_0_0Dir = V1_0_0_FILES_DIR.resolve("multiple-files");
+    Path testDir = copyV1Files(v1_0_0Dir, tempDir.resolve("multiple-files"));
 
     // Read with v2 code
     try (FileBasedWAL wal =
@@ -212,7 +220,7 @@ class BackwardCompatibilityTest {
   @Test
   void testV1ToV2ContinuousOperation(@TempDir Path tempDir) throws Exception {
     // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("small-entries");
+    Path v1Dir = V1_0_0_FILES_DIR.resolve("small-entries");
     Path testDir = copyV1Files(v1Dir, tempDir.resolve("continuous"));
 
     // Read existing v1 data with v2 code and then append new data
@@ -257,7 +265,7 @@ class BackwardCompatibilityTest {
   @Test
   void testV1FileRecoveryWithV2Code(@TempDir Path tempDir) throws Exception {
     // Copy v1 WAL files to temp directory
-    Path v1Dir = V1_FILES_DIR.resolve("small-entries");
+    Path v1Dir = V1_0_0_FILES_DIR.resolve("small-entries");
     Path testDir = copyV1Files(v1Dir, tempDir.resolve("recovery"));
 
     // Test basic recovery - open, verify state, close, reopen

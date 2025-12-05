@@ -2,7 +2,7 @@
 
 ## Overview
 
-Pintor is a high-performance, thread-safe Write Ahead Log (WAL) implementation designed for database systems requiring durability guarantees. This document describes the internal architecture, design decisions, and optimization strategies employed in Pintor v2.
+Pintor is a high-performance, thread-safe Write Ahead Log (WAL) implementation designed for database systems requiring durability guarantees. This document describes the internal architecture, design decisions, and optimization strategies employed in Pintor version 1.1.0.
 
 ## Core Architecture
 
@@ -36,17 +36,17 @@ Each WAL File:
 └── ...
 ```
 
-## Page Space Utilization Optimization (v2)
+## Page Space Utilization Optimization (Version 1.1.0)
 
 ### Problem Statement
 
-In Pintor v1, when writing entries larger than the remaining page space, the system would flush the current page (wasting free space) and start the spanning entry on a new page. This led to significant space waste, especially with mixed workloads containing both small and large entries.
+In Pintor version 1.0.0, when writing entries larger than the remaining page space, the system would flush the current page (wasting free space) and start the spanning entry on a new page. This led to significant space waste, especially with mixed workloads containing both small and large entries.
 
 ### Solution Architecture
 
-Pintor v2 introduces an intelligent page space utilization optimization that eliminates unnecessary page flushes by utilizing available space for spanning entry first parts.
+Pintor version 1.1.0 introduces an intelligent page space utilization optimization that eliminates unnecessary page flushes by utilizing available space for spanning entry first parts.
 
-#### Before Optimization (v1)
+#### Before Optimization (Version 1.0.0)
 
 ```mermaid
 graph TD
@@ -59,7 +59,7 @@ graph TD
     style D fill:#ffcccc
 ```
 
-#### After Optimization (v2)
+#### After Optimization (Version 1.1.0)
 
 ```mermaid
 graph TD
@@ -174,11 +174,11 @@ public boolean isLastPart() {
 
 ### Space Utilization Improvement
 
-**Before Optimization:**
+**Before Optimization (Version 1.0.0):**
 - Wasted space per spanning entry: Up to (page_size - header_size - 25) bytes
 - Worst case: 8KB page = 8,147 bytes wasted per spanning entry
 
-**After Optimization:**
+**After Optimization (Version 1.1.0):**
 - Wasted space per spanning entry: 0 bytes (optimal utilization)
 - Space savings: Up to 99.7% reduction in wasted space
 
@@ -196,7 +196,7 @@ public boolean isLastPart() {
 
 ### Performance Benchmarks
 
-| Metric | v1 (Before) | v2 (After) | Improvement |
+| Metric | Version 1.0.0 (Before) | Version 1.1.0 (After) | Improvement |
 |--------|-------------|------------|-------------|
 | Space Utilization | 85-90% | 98-99% | +10-15% |
 | Page Flushes | High | Optimal | -20-30% |
@@ -362,6 +362,6 @@ public class WALMetrics {
 
 ## Conclusion
 
-Pintor v2's architecture represents a significant advancement in WAL technology, combining optimal space utilization, backward compatibility, and high performance. The page space optimization alone delivers substantial improvements in storage efficiency and I/O performance while maintaining the reliability and consistency guarantees expected from a production-grade WAL system.
+Pintor version 1.1.0's architecture represents a significant advancement in WAL technology, combining optimal space utilization, backward compatibility, and high performance. The page space optimization alone delivers substantial improvements in storage efficiency and I/O performance while maintaining the reliability and consistency guarantees expected from a production-grade WAL system.
 
 The modular architecture ensures extensibility for future enhancements while the comprehensive observability features enable effective monitoring and troubleshooting in production environments.

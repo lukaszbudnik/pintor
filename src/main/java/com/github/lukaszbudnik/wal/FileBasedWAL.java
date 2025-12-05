@@ -938,8 +938,9 @@ public class FileBasedWAL implements WriteAheadLog {
    * of the new spanning entry - Both conditions can be true simultaneously, handling the transition
    * correctly
    *
-   * <p>This ensures backward compatibility with v1 files (which never use combined flags) while
-   * supporting the v2 optimization that utilizes available page space.
+   * <p>This ensures backward compatibility with files created by version 1.0.0 (which never use
+   * combined flags) while supporting the version 1.1.0 optimization that utilizes available page
+   * space.
    */
   private <T extends Comparable<T>> void emitEntriesFromFile(
       FluxSink<WALEntry> sink, Path walFile, RangeQuery<T> query) throws IOException, WALException {
