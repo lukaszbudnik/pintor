@@ -2,6 +2,8 @@
 
 Pintor is a robust, thread-safe Java implementation of a Write Ahead Log (WAL) system for ensuring data durability and consistency in databases. The name "pintor" means "painter" in Spanish - a playful nod to "painting" walls (WALs) with persistent data.
 
+> 📖 **For detailed architecture documentation, design decisions, and optimization strategies, see [ARCHITECTURE.md](ARCHITECTURE.md)**
+
 ## Key Features
 
 - 🔒 **Thread-safe operations**: Atomic entry creation and batching, eliminating race conditions.
@@ -202,7 +204,7 @@ Each page consists of a fixed-size header and a data section that contains the W
   - First Timestamp (8B) - Earliest entry timestamp milliseconds in page
   - Last Timestamp (8B) - Latest entry timestamp milliseconds in page
   - Entry Count (2B) - Number of entries in page
-  - Continuation Flags (1B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
+  - Continuation Flags (1B) - FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4, FIRST_PART|LAST_PART=5
   - Page Size KB (1B) - Page size in KB (4, 8, 16, 32, or 64)
   - Header CRC32 (4B) - Validates header integrity
 - **Data Section (page_size - 45 bytes)** - Contains WAL entries or continuation data for entries spanning multiple pages (for more see: [Record Spanning Examples](#record-spanning-examples))
@@ -243,10 +245,12 @@ Entries are stored sequentially in the data section of a page. An entry is compo
 
 Pages and WAL entries are buffered in memory and written to disk when any of the following conditions occur:
 
-1. Page becomes full - When the current page reaches 4KB capacity
+1. Page becomes full - When the current page reaches capacity
 2. Manual sync - When sync() method is called explicitly for durability
 3. Reading from log - When any of the read*() methods are called to make sure all data is on disk
 4. WAL closure - When close() method is called to ensure all data is persisted
+
+In v2 Pintor optimizes page space utilization by using available space (>= 25 bytes) for spanning entry first parts, reducing wasted space. The implementation is backward compatible - v2 can read v1 files without any issues.
 
 ### Record Spanning Examples
 
@@ -322,7 +326,7 @@ Page 3 (4096 bytes): [Header: 45 bytes, flags=LAST_PART, seq=305-305]
 **Key Rules:**
 - Every page always has a 45-byte header
 - Every entry always has a 25-byte header
-- Continuation flags indicate spanning record parts: FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4
+- Continuation flags indicate spanning record parts: FIRST_PART=1, MIDDLE_PART=2, LAST_PART=4, FIRST_PART|LAST_PART=5
 - Multiple complete entries can coexist with spanning entry parts in the same page
 - When FIRST_PART flag is set with multiple entries, only the last entry in sequence range is spanning
 - When LAST_PART flag is set with multiple entries, only the first entry in sequence range is spanning
