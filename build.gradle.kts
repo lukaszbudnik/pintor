@@ -53,7 +53,7 @@ jacoco {
 }
 
 dependencies {
-    val reactorVersion = "3.8.0"
+    val reactorVersion = "3.8.1"
     val mockitoVersion = "5.20.0"
     val junitVersion = "6.0.1"
     val slf4jVersion = "2.0.17"
